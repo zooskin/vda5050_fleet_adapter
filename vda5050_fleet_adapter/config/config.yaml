@@ -34,7 +34,7 @@ rmf_fleet:
   actions: ["teleop"]
   finishing_request: "park"
   robots:
-    AGV-001:
+    AGV_001:
       charger: "tinyRobot1_charger"
   robot_state_update_frequency: 10.0
 
