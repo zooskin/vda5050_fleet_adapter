@@ -16,7 +16,6 @@ import threading
 import time
 
 import rclpy
-from rclpy.duration import Duration
 import rclpy.node
 from rclpy.parameter import Parameter
 import rmf_adapter
@@ -234,8 +233,6 @@ def main(argv: list[str] | None = None) -> None:
             f'update_loop started, robots: {list(robots.keys())}'
         )
         while rclpy.ok():
-            now = node.get_clock().now()
-
             update_jobs = []
             for robot in robots.values():
                 update_jobs.append(_update_robot(robot))
@@ -248,11 +245,7 @@ def main(argv: list[str] | None = None) -> None:
                 asyncio.wait(update_jobs)
             )
 
-            next_wakeup = now + Duration(
-                nanoseconds=update_period * 1e9
-            )
-            while node.get_clock().now() < next_wakeup:
-                time.sleep(0.001)
+            time.sleep(update_period)
 
     update_thread = threading.Thread(
         target=update_loop, daemon=True
