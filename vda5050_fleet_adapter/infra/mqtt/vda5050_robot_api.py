@@ -333,12 +333,19 @@ class Vda5050RobotAPI(RobotAPI):
     ) -> None:
         """State 토픽 콜백."""
         try:
-            state = deserialize_state(payload.decode('utf-8'))
+            raw = payload.decode('utf-8')
+            logger.info(
+                'State raw message received: robot=%s, len=%d',
+                robot_name, len(raw),
+            )
+            state = deserialize_state(raw)
             with self._lock:
                 self._state_cache[robot_name] = state
-            logger.debug(
-                'State received: robot=%s, order=%s, driving=%s',
+            logger.info(
+                'State parsed: robot=%s, order=%s, driving=%s, '
+                'pos=%s',
                 robot_name, state.order_id, state.driving,
+                state.agv_position,
             )
         except Exception:
             logger.exception(

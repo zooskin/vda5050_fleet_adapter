@@ -35,13 +35,13 @@ rmf_fleet:
   finishing_request: "park"
   robots:
     AGV-001:
-      charger: "charger_1"
+      charger: "tinyRobot1_charger"
   robot_state_update_frequency: 10.0
 
 # MQTT / VDA5050 CONFIG ========================================================
 fleet_manager:
   ip: "127.0.0.1"
-  prefix: "uagv/v2/manufacturer"   # MQTT topic prefix
+  prefix: "uagv/v2/RobotCompany"   # MQTT topic prefix
   port: 1883
   user: ""
   password: ""

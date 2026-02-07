@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import logging
 import sys
 import threading
 import time
@@ -50,13 +51,26 @@ def _update_robot(robot: RobotAdapter) -> None:
     """로봇 상태를 업데이트한다."""
     data = robot.api.get_data(robot.name)
     if data is None:
+        robot.node.get_logger().warn(
+            f'No state data yet for {robot.name}, '
+            f'waiting for MQTT state message...'
+        )
         return
+
+    robot.node.get_logger().info(
+        f'[{robot.name}] data received - '
+        f'map: {data.map_name}, pos: {data.position}, '
+        f'battery: {data.battery_soc}'
+    )
 
     state = rmf_easy.RobotState(
         data.map_name, data.position, data.battery_soc
     )
 
     if robot.update_handle is None:
+        robot.node.get_logger().info(
+            f'[{robot.name}] adding robot to fleet_handle...'
+        )
         robot.update_handle = robot.fleet_handle.add_robot(
             robot.name,
             state,
@@ -65,6 +79,9 @@ def _update_robot(robot: RobotAdapter) -> None:
         )
         return
 
+    robot.node.get_logger().debug(
+        f'[{robot.name}] update_handle exists, updating state'
+    )
     robot.update(state, data)
 
 
@@ -76,6 +93,11 @@ def main(argv: list[str] | None = None) -> None:
     """
     if argv is None:
         argv = sys.argv
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format='[%(name)s] %(levelname)s: %(message)s',
+    )
 
     rclpy.init(args=argv)
     rmf_adapter.init_rclcpp()
@@ -170,14 +192,24 @@ def main(argv: list[str] | None = None) -> None:
 
     api = Vda5050RobotAPI(mqtt_client, prefix, manufacturer)
     api.connect()
+    time.sleep(0.5)  # MQTT 연결 대기
+    node.get_logger().info(
+        f'MQTT connected: {mqtt_client.is_connected}, '
+        f'prefix: {prefix}'
+    )
 
     # 8. 로봇별 RobotAdapter 생성
+    node.get_logger().info(f'known_robots: {fleet_config.known_robots}')
     robots: dict[str, RobotAdapter] = {}
     for robot_name in fleet_config.known_robots:
         robot_config = fleet_config.get_known_robot_configuration(
             robot_name
         )
         api.subscribe_robot(robot_name)
+        node.get_logger().info(
+            f'Robot registered: {robot_name}, '
+            f'state topic: {prefix}/{robot_name}/state'
+        )
 
         robot = RobotAdapter(
             name=robot_name,
@@ -198,12 +230,19 @@ def main(argv: list[str] | None = None) -> None:
 
     def update_loop() -> None:
         asyncio.set_event_loop(asyncio.new_event_loop())
+        node.get_logger().info(
+            f'update_loop started, robots: {list(robots.keys())}'
+        )
         while rclpy.ok():
             now = node.get_clock().now()
 
             update_jobs = []
             for robot in robots.values():
                 update_jobs.append(_update_robot(robot))
+
+            if not update_jobs:
+                time.sleep(update_period)
+                continue
 
             asyncio.get_event_loop().run_until_complete(
                 asyncio.wait(update_jobs)

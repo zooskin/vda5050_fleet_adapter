@@ -118,9 +118,8 @@ class MqttClient:
         """
         with self._lock:
             self._subscriptions[topic] = callback
-            if self._connected:
-                self._client.subscribe(topic, qos=qos)
-                logger.debug('MQTT subscribed: %s (qos=%d)', topic, qos)
+            self._client.subscribe(topic, qos=qos)
+            logger.info('MQTT subscribe requested: %s (qos=%d)', topic, qos)
 
     def unsubscribe(self, topic: str) -> None:
         """토픽 구독을 해제한다.
