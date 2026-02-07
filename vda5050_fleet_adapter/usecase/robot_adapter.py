@@ -122,6 +122,10 @@ class RobotAdapter:
         """
         self.cmd_id += 1
         self.execution = execution
+        self.node.get_logger().info(
+            f'[{self.name}] navigate callback called, '
+            f'dest={destination.position}, map={destination.map}'
+        )
 
         goal_node = find_nearest_node(
             self.nav_nodes,
@@ -235,7 +239,19 @@ class RobotAdapter:
         self.cancel_cmd_attempt()
 
         def loop() -> None:
-            while not cmd(*args):
+            from vda5050_fleet_adapter.usecase.ports.robot_api import (
+                RobotAPIResult,
+            )
+            while True:
+                result = cmd(*args)
+                if result == RobotAPIResult.SUCCESS:
+                    break
+                if result == RobotAPIResult.IMPOSSIBLE:
+                    logger.error(
+                        'Command impossible for robot %s, giving up',
+                        self.name,
+                    )
+                    break
                 logger.warning(
                     'Failed to contact fleet manager for robot %s, '
                     'retrying...', self.name
