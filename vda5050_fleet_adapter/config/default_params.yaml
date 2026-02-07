@@ -1,0 +1,19 @@
+vda5050_fleet_adapter:
+  ros__parameters:
+    fleet_name: "vda5050_fleet"
+
+    mqtt:
+      broker_host: "localhost"
+      broker_port: 1883
+      keepalive_sec: 60
+      reconnect_max_delay_sec: 60
+
+    vda5050:
+      interface_name: "uagv"
+      protocol_version: "v2"
+      manufacturer: "default_manufacturer"
+
+    adapter:
+      state_publish_rate_hz: 1.0
+      order_timeout_sec: 30.0
+      max_retry_count: 3
