@@ -41,31 +41,31 @@ def parse_nav_graph(
     vertices = nav_graph['levels'][level]['vertices']
     lanes = nav_graph['levels'][level]['lanes']
 
+    # vertex 인덱스 → 이름 매핑 (빈 이름이나 중복은 node{i}로 대체)
     nodes: dict[str, dict[str, Any]] = {}
+    index_to_name: list[str] = []
     for i, vertex in enumerate(vertices):
-        name = vertex[2].get('name', f'node{i}') if len(vertex) > 2 else f'node{i}'
+        attrs = vertex[2] if len(vertex) > 2 else {}
+        name = attrs.get('name', '') if isinstance(attrs, dict) else ''
+        if not name or name in nodes:
+            name = f'node{i}'
+        index_to_name.append(name)
         nodes[name] = {
             'x': float(vertex[0]),
             'y': float(vertex[1]),
-            'attributes': vertex[2] if len(vertex) > 2 else {},
-        }
-
-    edges: dict[str, dict[str, Any]] = {}
-    node_names = list(nodes.keys())
-    for i, lane in enumerate(lanes):
-        start_node = node_names[lane[0]]
-        end_node = node_names[lane[1]]
-        attrs = lane[2] if len(lane) > 2 else {}
-        edge_name_a = f'edge{i}_a'
-        edges[edge_name_a] = {
-            'start': start_node,
-            'end': end_node,
             'attributes': attrs,
         }
-        edge_name_b = f'edge{i}_b'
-        edges[edge_name_b] = {
-            'start': end_node,
-            'end': start_node,
+
+    # lane은 이미 방향별로 분리되어 있으므로 그대로 사용
+    edges: dict[str, dict[str, Any]] = {}
+    for i, lane in enumerate(lanes):
+        start_node = index_to_name[lane[0]]
+        end_node = index_to_name[lane[1]]
+        attrs = lane[2] if len(lane) > 2 else {}
+        edge_name = f'edge{i}'
+        edges[edge_name] = {
+            'start': start_node,
+            'end': end_node,
             'attributes': attrs,
         }
 

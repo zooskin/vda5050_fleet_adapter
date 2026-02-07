@@ -30,7 +30,9 @@ class TestParseNavGraph:
                     ],
                     'lanes': [
                         [0, 1, {}],
+                        [1, 0, {}],
                         [1, 2, {}],
+                        [2, 1, {}],
                     ],
                 }
             }
@@ -47,7 +49,7 @@ class TestParseNavGraph:
         assert 'wp3' in nodes
         assert nodes['wp1']['x'] == 0.0
         assert nodes['wp2']['x'] == 5.0
-        # 양방향이므로 엣지 수 = lanes * 2
+        # lane 1개당 edge 1개 (이미 방향별 분리)
         assert len(edges) == 4
 
     def test_parse_unnamed_vertices(self, tmp_path):
@@ -71,6 +73,36 @@ class TestParseNavGraph:
 
         assert 'node0' in nodes
         assert 'node1' in nodes
+
+    def test_parse_empty_name_vertices(self, tmp_path):
+        """빈 이름('') 정점은 node{i}로 대체된다."""
+        nav_data = {
+            'levels': {
+                'L1': {
+                    'vertices': [
+                        [0.0, 0.0, {'name': 'wp1'}],
+                        [1.0, 0.0, {'name': ''}],
+                        [2.0, 0.0, {'name': ''}],
+                    ],
+                    'lanes': [
+                        [0, 1, {}],
+                        [1, 2, {}],
+                    ],
+                }
+            }
+        }
+        path = tmp_path / 'nav.yaml'
+        with open(path, 'w') as f:
+            yaml.dump(nav_data, f)
+
+        nodes, edges = parse_nav_graph(str(path))
+
+        assert len(nodes) == 3
+        assert 'wp1' in nodes
+        assert 'node1' in nodes
+        assert 'node2' in nodes
+        # lane 인덱스로 정상 참조 가능
+        assert len(edges) == 2
 
 
 class TestCreateGraph:

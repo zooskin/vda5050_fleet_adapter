@@ -1,3 +1,6 @@
+from glob import glob
+import os
+
 from setuptools import find_packages, setup
 
 package_name = 'vda5050_fleet_adapter'
@@ -12,6 +15,10 @@ setup(
         ('share/' + package_name, ['package.xml']),
         ('share/' + package_name + '/config',
             [package_name + '/config/config.yaml']),
+        (
+            os.path.join('share', package_name, 'launch'),
+            glob('launch/*.launch.xml'),
+        ),
     ],
     install_requires=[
         'setuptools',

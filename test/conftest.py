@@ -169,12 +169,12 @@ def sample_nav_nodes():
 def sample_nav_edges():
     """내비게이션 그래프 엣지 샘플."""
     return {
-        'e0_a': {'start': 'wp1', 'end': 'wp2', 'attributes': {}},
-        'e0_b': {'start': 'wp2', 'end': 'wp1', 'attributes': {}},
-        'e1_a': {'start': 'wp2', 'end': 'wp3', 'attributes': {}},
-        'e1_b': {'start': 'wp3', 'end': 'wp2', 'attributes': {}},
-        'e2_a': {'start': 'wp3', 'end': 'wp4', 'attributes': {}},
-        'e2_b': {'start': 'wp4', 'end': 'wp3', 'attributes': {}},
-        'e3_a': {'start': 'wp4', 'end': 'wp1', 'attributes': {}},
-        'e3_b': {'start': 'wp1', 'end': 'wp4', 'attributes': {}},
+        'edge0': {'start': 'wp1', 'end': 'wp2', 'attributes': {}},
+        'edge1': {'start': 'wp2', 'end': 'wp1', 'attributes': {}},
+        'edge2': {'start': 'wp2', 'end': 'wp3', 'attributes': {}},
+        'edge3': {'start': 'wp3', 'end': 'wp2', 'attributes': {}},
+        'edge4': {'start': 'wp3', 'end': 'wp4', 'attributes': {}},
+        'edge5': {'start': 'wp4', 'end': 'wp3', 'attributes': {}},
+        'edge6': {'start': 'wp4', 'end': 'wp1', 'attributes': {}},
+        'edge7': {'start': 'wp1', 'end': 'wp4', 'attributes': {}},
     }
