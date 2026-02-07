@@ -16,12 +16,12 @@ from vda5050_fleet_adapter.domain.value_objects.trajectory import (
 )
 
 __all__ = [
-    "AgvPosition",
-    "BoundingBoxReference",
-    "ControlPoint",
-    "Corridor",
-    "LoadDimensions",
-    "NodePosition",
-    "Trajectory",
-    "Velocity",
+    'AgvPosition',
+    'BoundingBoxReference',
+    'ControlPoint',
+    'Corridor',
+    'LoadDimensions',
+    'NodePosition',
+    'Trajectory',
+    'Velocity',
 ]

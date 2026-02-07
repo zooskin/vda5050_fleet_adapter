@@ -40,5 +40,5 @@ class NodeState:
     node_id: str
     sequence_id: int
     released: bool
-    node_description: str = ""
+    node_description: str = ''
     node_position: NodePosition | None = None

@@ -52,4 +52,4 @@ class EdgeState:
     edge_id: str
     sequence_id: int
     released: bool
-    edge_description: str = ""
+    edge_description: str = ''

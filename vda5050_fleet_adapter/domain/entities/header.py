@@ -1,7 +1,7 @@
 """VDA5050 공통 메시지 헤더."""
 
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime, UTC
 
 
 @dataclass
@@ -9,7 +9,7 @@ class Header:
     """모든 VDA5050 메시지의 공통 헤더.
 
     Args:
-        version: 프로토콜 버전 (e.g. "2.0.0").
+        version: 프로토콜 버전 (e.g. '2.0.0').
         manufacturer: AGV 제조사명.
         serial_number: AGV 고유 식별자.
         header_id: 토픽별 증가 카운터.

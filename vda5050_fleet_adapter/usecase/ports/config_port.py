@@ -1,11 +1,13 @@
-"""설정 로더 포트 인터페이스.
+"""설정 포트 인터페이스.
 
 애플리케이션 설정의 로딩을 추상화한다.
-ROS 2 파라미터 또는 YAML 파일로 구현 가능하다.
 """
 
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -19,66 +21,61 @@ class MqttConfig:
         reconnect_max_delay_sec: 재연결 최대 대기 시간 (초).
     """
 
-    broker_host: str = "localhost"
+    broker_host: str = 'localhost'
     broker_port: int = 1883
     keepalive_sec: int = 60
     reconnect_max_delay_sec: int = 60
 
 
 @dataclass(frozen=True)
-class Vda5050Config:
-    """VDA5050 프로토콜 설정.
+class FleetManagerConfig:
+    """VDA5050 Fleet Manager (MQTT) 설정.
+
+    mrceki/vda5050_fleet_adapter의 fleet_manager 설정 형식.
 
     Args:
-        interface_name: MQTT 토픽 인터페이스명.
-        protocol_version: VDA5050 프로토콜 메이저 버전.
-        manufacturer: AGV 제조사명.
+        ip: MQTT 브로커 IP.
+        prefix: MQTT 토픽 prefix (e.g. 'uagv/v2/manufacturer').
+        port: MQTT 브로커 포트.
+        user: MQTT 인증 사용자명.
+        password: MQTT 인증 비밀번호.
+        robot_state_update_frequency: 상태 업데이트 주파수 (Hz).
     """
 
-    interface_name: str = "uagv"
-    protocol_version: str = "v2"
-    manufacturer: str = "default_manufacturer"
+    ip: str = '127.0.0.1'
+    prefix: str = 'uagv/v2/manufacturer'
+    port: int = 1883
+    user: str = ''
+    password: str = ''
+    robot_state_update_frequency: float = 10.0
 
 
 @dataclass(frozen=True)
-class AdapterConfig:
-    """Fleet Adapter 동작 설정.
+class ReferenceCoordinates:
+    """좌표 변환 기준점 설정.
 
     Args:
-        fleet_name: RMF Fleet 이름.
-        state_publish_rate_hz: State 발행 주기 (Hz).
-        order_timeout_sec: 주문 응답 타임아웃 (초).
-        max_retry_count: 최대 재시도 횟수.
+        rmf: RMF 좌표계의 기준점 리스트 [[x,y], ...].
+        robot: 로봇 좌표계의 기준점 리스트 [[x,y], ...].
     """
 
-    fleet_name: str = "vda5050_fleet"
-    state_publish_rate_hz: float = 1.0
-    order_timeout_sec: float = 30.0
-    max_retry_count: int = 3
-
-
-@dataclass(frozen=True)
-class AppConfig:
-    """애플리케이션 전체 설정.
-
-    Args:
-        mqtt: MQTT 설정.
-        vda5050: VDA5050 프로토콜 설정.
-        adapter: Adapter 동작 설정.
-    """
-
-    mqtt: MqttConfig = MqttConfig()
-    vda5050: Vda5050Config = Vda5050Config()
-    adapter: AdapterConfig = AdapterConfig()
+    rmf: list[list[float]] = field(default_factory=list)
+    robot: list[list[float]] = field(default_factory=list)
 
 
 class ConfigPort(ABC):
     """설정 로더 인터페이스."""
 
     @abstractmethod
-    def load(self) -> AppConfig:
-        """설정을 로드하여 반환한다.
+    def load(
+        self, config_path: str, nav_graph_path: str
+    ) -> dict[str, Any]:
+        """설정 파일을 로드하여 raw dict로 반환한다.
+
+        Args:
+            config_path: config.yaml 파일 경로.
+            nav_graph_path: 내비게이션 그래프 파일 경로.
 
         Returns:
-            애플리케이션 전체 설정.
+            raw YAML dict.
         """

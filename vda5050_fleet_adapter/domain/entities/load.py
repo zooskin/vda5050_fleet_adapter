@@ -14,16 +14,16 @@ class Load:
 
     Args:
         load_id: 화물 고유 ID.
-        load_type: 화물 유형 (e.g. "EPAL").
-        load_position: 적재 위치 (e.g. "front", "rear").
+        load_type: 화물 유형 (e.g. 'EPAL').
+        load_position: 적재 위치 (e.g. 'front', 'rear').
         bounding_box_reference: 바운딩 박스 기준점.
         load_dimensions: 화물 크기.
         weight: 중량 (kg).
     """
 
-    load_id: str = ""
-    load_type: str = ""
-    load_position: str = ""
+    load_id: str = ''
+    load_type: str = ''
+    load_position: str = ''
     bounding_box_reference: BoundingBoxReference | None = None
     load_dimensions: LoadDimensions | None = None
     weight: float | None = None

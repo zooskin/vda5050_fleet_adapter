@@ -4,12 +4,8 @@
 domain 레이어만 의존하며, infra 레이어 의존성은 없다.
 """
 
-from vda5050_fleet_adapter.usecase.handle_action import HandleAction
-from vda5050_fleet_adapter.usecase.process_order import ProcessOrder
-from vda5050_fleet_adapter.usecase.update_agv_state import UpdateAgvState
+from vda5050_fleet_adapter.usecase.robot_adapter import RobotAdapter
 
 __all__ = [
-    "HandleAction",
-    "ProcessOrder",
-    "UpdateAgvState",
+    'RobotAdapter',
 ]

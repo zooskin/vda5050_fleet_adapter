@@ -6,9 +6,9 @@ paho-mqtt의 저수준 API를 캡슐화한다.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 import logging
 import threading
-from collections.abc import Callable
 
 import paho.mqtt.client as mqtt
 
@@ -25,7 +25,7 @@ class MqttClient:
         client_id: MQTT 클라이언트 ID.
     """
 
-    def __init__(self, config: MqttConfig, client_id: str = "") -> None:
+    def __init__(self, config: MqttConfig, client_id: str = '') -> None:
         self._config = config
         self._client = mqtt.Client(
             callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
@@ -69,7 +69,7 @@ class MqttClient:
     def connect(self) -> None:
         """MQTT 브로커에 연결한다."""
         logger.info(
-            "MQTT connecting to %s:%d",
+            'MQTT connecting to %s:%d',
             self._config.broker_host,
             self._config.broker_port,
         )
@@ -82,7 +82,7 @@ class MqttClient:
 
     def disconnect(self) -> None:
         """MQTT 브로커 연결을 종료한다."""
-        logger.info("MQTT disconnecting")
+        logger.info('MQTT disconnecting')
         self._client.loop_stop()
         self._client.disconnect()
         self._connected = False
@@ -100,11 +100,11 @@ class MqttClient:
         """
         with self._lock:
             result = self._client.publish(
-                topic, payload.encode("utf-8"), qos=qos, retain=retain
+                topic, payload.encode('utf-8'), qos=qos, retain=retain
             )
             if result.rc != mqtt.MQTT_ERR_SUCCESS:
                 logger.error(
-                    "MQTT publish failed: topic=%s, rc=%d", topic, result.rc
+                    'MQTT publish failed: topic=%s, rc=%d', topic, result.rc
                 )
 
     def subscribe(
@@ -121,7 +121,7 @@ class MqttClient:
             self._subscriptions[topic] = callback
             if self._connected:
                 self._client.subscribe(topic, qos=qos)
-                logger.debug("MQTT subscribed: %s (qos=%d)", topic, qos)
+                logger.debug('MQTT subscribed: %s (qos=%d)', topic, qos)
 
     def unsubscribe(self, topic: str) -> None:
         """토픽 구독을 해제한다.
@@ -145,14 +145,14 @@ class MqttClient:
         """연결 성공 콜백."""
         if reason_code == 0:
             self._connected = True
-            logger.info("MQTT connected to broker")
+            logger.info('MQTT connected to broker')
             # 재연결 시 기존 구독 복원
             with self._lock:
                 for topic in self._subscriptions:
                     self._client.subscribe(topic)
-                    logger.debug("MQTT re-subscribed: %s", topic)
+                    logger.debug('MQTT re-subscribed: %s', topic)
         else:
-            logger.error("MQTT connection failed: rc=%s", reason_code)
+            logger.error('MQTT connection failed: rc=%s', reason_code)
 
     def _on_disconnect(
         self,
@@ -166,7 +166,7 @@ class MqttClient:
         self._connected = False
         if reason_code != 0:
             logger.warning(
-                "MQTT unexpected disconnect: rc=%s, auto-reconnecting",
+                'MQTT unexpected disconnect: rc=%s, auto-reconnecting',
                 reason_code,
             )
 
@@ -185,7 +185,7 @@ class MqttClient:
                 callback(msg.topic, msg.payload)
             except Exception:
                 logger.exception(
-                    "Error in MQTT message handler: topic=%s", msg.topic
+                    'Error in MQTT message handler: topic=%s', msg.topic
                 )
         else:
-            logger.debug("No handler for topic: %s", msg.topic)
+            logger.debug('No handler for topic: %s', msg.topic)

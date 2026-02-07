@@ -2,9 +2,7 @@
 
 from vda5050_fleet_adapter.domain.enums import CorridorRefPoint
 from vda5050_fleet_adapter.domain.value_objects.physical import (
-    BoundingBoxReference,
     Corridor,
-    LoadDimensions,
 )
 from vda5050_fleet_adapter.domain.value_objects.position import (
     AgvPosition,
@@ -19,33 +17,33 @@ from vda5050_fleet_adapter.domain.value_objects.trajectory import (
 
 class TestNodePosition:
     def test_frozen(self):
-        pos = NodePosition(x=1.0, y=2.0, map_id="map1")
+        pos = NodePosition(x=1.0, y=2.0, map_id='map1')
         try:
             pos.x = 99.0
-            assert False, "Should raise FrozenInstanceError"
+            assert False, 'Should raise FrozenInstanceError'
         except AttributeError:
             pass
 
     def test_optional_fields_default_none(self):
-        pos = NodePosition(x=1.0, y=2.0, map_id="map1")
+        pos = NodePosition(x=1.0, y=2.0, map_id='map1')
         assert pos.theta is None
         assert pos.allowed_deviation_xy is None
         assert pos.allowed_deviation_theta is None
 
     def test_equality(self):
-        a = NodePosition(x=1.0, y=2.0, map_id="m1", theta=0.5)
-        b = NodePosition(x=1.0, y=2.0, map_id="m1", theta=0.5)
+        a = NodePosition(x=1.0, y=2.0, map_id='m1', theta=0.5)
+        b = NodePosition(x=1.0, y=2.0, map_id='m1', theta=0.5)
         assert a == b
 
     def test_inequality(self):
-        a = NodePosition(x=1.0, y=2.0, map_id="m1")
-        b = NodePosition(x=1.0, y=3.0, map_id="m1")
+        a = NodePosition(x=1.0, y=2.0, map_id='m1')
+        b = NodePosition(x=1.0, y=3.0, map_id='m1')
         assert a != b
 
 
 class TestAgvPosition:
     def test_defaults(self):
-        pos = AgvPosition(x=0.0, y=0.0, theta=0.0, map_id="map1")
+        pos = AgvPosition(x=0.0, y=0.0, theta=0.0, map_id='map1')
         assert pos.position_initialized is True
         assert pos.localization_score is None
 

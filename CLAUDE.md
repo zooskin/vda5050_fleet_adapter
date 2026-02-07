@@ -3,6 +3,10 @@
 ## Project Overview
 VDA5050 Fleet Adapter: ROS 2 (Jazzy) + Open-RMF fleet adapter bridging VDA5050 AGVs via MQTT.
 
+## Reference Implementation
+- Fleet adapter 구현 시 [rmf_demos_fleet_adapter](https://github.com/open-rmf/rmf_demos/tree/main/rmf_demos_fleet_adapter)를 참조할 것
+- Fleet adapter 구현 시 [vda5050_fleet_adapter](https://github.com/mrceki/vda5050_fleet_adapter/tree/main/vda5050_fleet_adapter)를 참조할 것 
+
 ## Tech Stack
 - Python 3.12+ / ROS 2 Jazzy Jalisco (Ubuntu 24.04)
 - `rmf_fleet_adapter_python`, `rclpy`, MQTT (paho-mqtt)
@@ -64,6 +68,9 @@ colcon test-result --verbose
 cd ~/rmf_ws/src/vda5050_fleet_adapter && python -m flake8
 python -m pytest test/
 ```
+
+## Workflow
+- 작업이 완료되면 자동으로 git commit을 수행할 것 (사용자가 별도로 요청하지 않아도)
 
 ## Key Constraints
 - Do NOT add ROS 2 message type definitions here; use existing rmf_fleet_msgs

@@ -10,7 +10,7 @@ class ErrorReference:
     """에러 관련 엔티티 참조 (근본 원인 추적용).
 
     Args:
-        reference_key: 참조 키 (e.g. "nodeId", "actionId").
+        reference_key: 참조 키 (e.g. 'nodeId', 'actionId').
         reference_value: 참조 값.
     """
 
@@ -32,8 +32,8 @@ class AgvError:
 
     error_type: str
     error_level: ErrorLevel
-    error_description: str = ""
-    error_hint: str = ""
+    error_description: str = ''
+    error_hint: str = ''
     error_references: list[ErrorReference] = field(default_factory=list)
 
 
@@ -50,5 +50,5 @@ class AgvInformation:
 
     info_type: str
     info_level: InfoLevel
-    info_description: str = ""
+    info_description: str = ''
     info_references: list[ErrorReference] = field(default_factory=list)

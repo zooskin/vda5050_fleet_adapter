@@ -1,78 +1,96 @@
-"""YamlConfigLoader 단위 테스트."""
+"""YamlConfigLoader 유닛 테스트."""
 
-from pathlib import Path
+import pytest  # noqa: F401
+from vda5050_fleet_adapter.infra.config.yaml_config_loader import (
+    YamlConfigLoader,
+)
+import yaml
 
-import pytest
 
-from vda5050_fleet_adapter.infra.config import YamlConfigLoader
+@pytest.fixture
+def config_yaml(tmp_path):
+    """임시 config.yaml 파일을 생성한다."""
+    data = {
+        'rmf_fleet': {
+            'name': 'test_fleet',
+            'limits': {'linear': [0.5, 0.75], 'angular': [0.6, 2.0]},
+            'robots': {'AGV-001': {'charger': 'charger_1'}},
+            'robot_state_update_frequency': 10.0,
+        },
+        'fleet_manager': {
+            'ip': '192.168.1.100',
+            'prefix': 'uagv/v2/TestCo',
+            'port': 1884,
+            'user': 'admin',
+            'password': 'secret',
+        },
+        'reference_coordinates': {
+            'L1': {
+                'rmf': [[0, 0], [1, 0], [0, 1], [1, 1]],
+                'robot': [[0, 0], [10, 0], [0, 10], [10, 10]],
+            }
+        },
+    }
+    path = tmp_path / 'config.yaml'
+    with open(path, 'w') as f:
+        yaml.dump(data, f)
+    return str(path)
 
 
 class TestYamlConfigLoader:
-    def test_load_default_config(self):
+    """YamlConfigLoader 테스트."""
+
+    def test_load_valid_config(self, config_yaml):
+        """유효한 설정 파일을 로드한다."""
         loader = YamlConfigLoader()
-        config = loader.load()
+        data = loader.load(config_yaml, '/fake/nav.yaml')
 
-        assert config.mqtt.broker_host == "localhost"
-        assert config.mqtt.broker_port == 1883
-        assert config.mqtt.keepalive_sec == 60
-        assert config.vda5050.interface_name == "uagv"
-        assert config.vda5050.protocol_version == "v2"
-        assert config.adapter.fleet_name == "vda5050_fleet"
-        assert config.adapter.state_publish_rate_hz == 1.0
-        assert config.adapter.order_timeout_sec == 30.0
-        assert config.adapter.max_retry_count == 3
+        assert 'rmf_fleet' in data
+        assert data['rmf_fleet']['name'] == 'test_fleet'
+        assert 'fleet_manager' in data
+        assert data['fleet_manager']['ip'] == '192.168.1.100'
 
-    def test_missing_file_returns_defaults(self, tmp_path):
-        loader = YamlConfigLoader(tmp_path / "nonexistent.yaml")
-        config = loader.load()
+    def test_load_fleet_manager_section(self, config_yaml):
+        """fleet_manager 섹션을 올바르게 로드한다."""
+        loader = YamlConfigLoader()
+        data = loader.load(config_yaml, '/fake/nav.yaml')
 
-        assert config.mqtt.broker_host == "localhost"
-        assert config.adapter.fleet_name == "vda5050_fleet"
+        fm = data['fleet_manager']
+        assert fm['port'] == 1884
+        assert fm['prefix'] == 'uagv/v2/TestCo'
+        assert fm['user'] == 'admin'
 
-    def test_custom_config(self, tmp_path):
-        config_file = tmp_path / "custom.yaml"
-        config_file.write_text("""
-vda5050_fleet_adapter:
-  ros__parameters:
-    fleet_name: "custom_fleet"
-    mqtt:
-      broker_host: "192.168.1.100"
-      broker_port: 8883
-    vda5050:
-      manufacturer: "CustomCo"
-    adapter:
-      state_publish_rate_hz: 2.0
-      max_retry_count: 5
-""")
-        loader = YamlConfigLoader(config_file)
-        config = loader.load()
+    def test_load_reference_coordinates(self, config_yaml):
+        """reference_coordinates를 올바르게 로드한다."""
+        loader = YamlConfigLoader()
+        data = loader.load(config_yaml, '/fake/nav.yaml')
 
-        assert config.mqtt.broker_host == "192.168.1.100"
-        assert config.mqtt.broker_port == 8883
-        assert config.vda5050.manufacturer == "CustomCo"
-        assert config.adapter.fleet_name == "custom_fleet"
-        assert config.adapter.state_publish_rate_hz == 2.0
-        assert config.adapter.max_retry_count == 5
+        rc = data['reference_coordinates']['L1']
+        assert len(rc['rmf']) == 4
+        assert len(rc['robot']) == 4
 
-    def test_partial_config_uses_defaults(self, tmp_path):
-        config_file = tmp_path / "partial.yaml"
-        config_file.write_text("""
-vda5050_fleet_adapter:
-  ros__parameters:
-    mqtt:
-      broker_host: "10.0.0.1"
-""")
-        loader = YamlConfigLoader(config_file)
-        config = loader.load()
+    def test_load_nonexistent_file(self, tmp_path):
+        """존재하지 않는 파일에 대해 빈 dict를 반환한다."""
+        loader = YamlConfigLoader()
+        data = loader.load(
+            str(tmp_path / 'nonexistent.yaml'), '/fake/nav.yaml'
+        )
+        assert data == {}
 
-        assert config.mqtt.broker_host == "10.0.0.1"
-        assert config.mqtt.broker_port == 1883  # default
+    def test_load_invalid_yaml(self, tmp_path):
+        """잘못된 YAML에 대해 빈 dict를 반환한다."""
+        path = tmp_path / 'bad.yaml'
+        with open(path, 'w') as f:
+            f.write('just a string')
+        loader = YamlConfigLoader()
+        data = loader.load(str(path), '/fake/nav.yaml')
+        assert data == {}
 
-    def test_empty_file_returns_defaults(self, tmp_path):
-        config_file = tmp_path / "empty.yaml"
-        config_file.write_text("")
+    def test_load_robots_section(self, config_yaml):
+        """Robots 섹션을 올바르게 로드한다."""
+        loader = YamlConfigLoader()
+        data = loader.load(config_yaml, '/fake/nav.yaml')
 
-        loader = YamlConfigLoader(config_file)
-        config = loader.load()
-
-        assert config.mqtt.broker_host == "localhost"
+        robots = data['rmf_fleet']['robots']
+        assert 'AGV-001' in robots
+        assert robots['AGV-001']['charger'] == 'charger_1'

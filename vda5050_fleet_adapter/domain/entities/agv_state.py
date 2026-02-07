@@ -50,9 +50,9 @@ class AgvState:
     """
 
     header: Header
-    order_id: str = ""
+    order_id: str = ''
     order_update_id: int = 0
-    last_node_id: str = ""
+    last_node_id: str = ''
     last_node_sequence_id: int = 0
     driving: bool = False
     new_base_request: bool = False

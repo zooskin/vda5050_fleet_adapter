@@ -23,7 +23,7 @@ class Action:
     """VDA5050 액션 정의 (Order/InstantActions에서 사용).
 
     Args:
-        action_type: 액션 종류 식별자 (e.g. "pick", "drop").
+        action_type: 액션 종류 식별자 (e.g. 'pick', 'drop').
         action_id: 고유 ID (UUID 권장).
         blocking_type: 블로킹 유형.
         action_description: 액션 설명.
@@ -33,7 +33,7 @@ class Action:
     action_type: str
     action_id: str
     blocking_type: BlockingType
-    action_description: str = ""
+    action_description: str = ''
     action_parameters: list[ActionParameter] = field(default_factory=list)
 
 
@@ -52,8 +52,8 @@ class ActionState:
     action_id: str
     action_type: str
     action_status: ActionStatus = ActionStatus.WAITING
-    action_description: str = ""
-    result_description: str = ""
+    action_description: str = ''
+    result_description: str = ''
 
     def transition_to(self, new_status: ActionStatus) -> None:
         """액션 상태를 전이한다.
@@ -84,7 +84,7 @@ class ActionState:
         allowed = valid_transitions.get(self.action_status, set())
         if new_status not in allowed:
             raise InvalidStateTransitionError(
-                f"Action [{self.action_id}]: "
-                f"{self.action_status} -> {new_status} 전이 불가"
+                f'Action [{self.action_id}]: '
+                f'{self.action_status} -> {new_status} 전이 불가'
             )
         self.action_status = new_status
