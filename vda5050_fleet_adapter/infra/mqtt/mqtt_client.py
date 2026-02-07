@@ -28,7 +28,6 @@ class MqttClient:
     def __init__(self, config: MqttConfig, client_id: str = '') -> None:
         self._config = config
         self._client = mqtt.Client(
-            callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
             client_id=client_id,
             protocol=mqtt.MQTTv311,
         )
@@ -138,12 +137,11 @@ class MqttClient:
         self,
         client: mqtt.Client,
         userdata: object,
-        flags: mqtt.ConnectFlags,
-        reason_code: mqtt.ReasonCode,
-        properties: mqtt.Properties | None,
+        flags: dict,
+        rc: int,
     ) -> None:
         """연결 성공 콜백."""
-        if reason_code == 0:
+        if rc == 0:
             self._connected = True
             logger.info('MQTT connected to broker')
             # 재연결 시 기존 구독 복원
@@ -152,22 +150,20 @@ class MqttClient:
                     self._client.subscribe(topic)
                     logger.debug('MQTT re-subscribed: %s', topic)
         else:
-            logger.error('MQTT connection failed: rc=%s', reason_code)
+            logger.error('MQTT connection failed: rc=%d', rc)
 
     def _on_disconnect(
         self,
         client: mqtt.Client,
         userdata: object,
-        flags: mqtt.DisconnectFlags,
-        reason_code: mqtt.ReasonCode,
-        properties: mqtt.Properties | None,
+        rc: int,
     ) -> None:
         """연결 해제 콜백."""
         self._connected = False
-        if reason_code != 0:
+        if rc != 0:
             logger.warning(
-                'MQTT unexpected disconnect: rc=%s, auto-reconnecting',
-                reason_code,
+                'MQTT unexpected disconnect: rc=%d, auto-reconnecting',
+                rc,
             )
 
     def _on_message(
