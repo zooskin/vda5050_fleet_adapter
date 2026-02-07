@@ -9,6 +9,7 @@ mrceki/vda5050_fleet_adapter + rmf_demos_fleet_adapter 패턴을 따른다.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import logging
 import sys
 import threading
@@ -36,12 +37,19 @@ from vda5050_fleet_adapter.usecase.robot_adapter import RobotAdapter
 import yaml
 
 
+def _parallel(func):
+    """비동기 병렬 실행 데코레이터."""
+    def run_in_parallel(*args, **kwargs):
+        return asyncio.get_event_loop().run_in_executor(
+            None, func, *args, **kwargs
+        )
+    return run_in_parallel
 
+
+@_parallel
 def _update_robot(robot: RobotAdapter) -> None:
     """로봇 상태를 업데이트한다."""
-    robot.node.get_logger().info(f'##################robot.name: {robot.name}')
     data = robot.api.get_data(robot.name)
-    robot.node.get_logger().info(f'robot.name: {robot.name}, data : {data}')
     if data is None:
         robot.node.get_logger().warn(
             f'No state data yet for {robot.name}, '
@@ -221,26 +229,30 @@ def main(argv: list[str] | None = None) -> None:
     )
 
     def update_loop() -> None:
+        asyncio.set_event_loop(asyncio.new_event_loop())
         node.get_logger().info(
             f'update_loop started, robots: {list(robots.keys())}'
         )
         while rclpy.ok():
-            try:
-                now = node.get_clock().now()
+            now = node.get_clock().now()
 
-                for robot in robots.values():
-                    _update_robot(robot)
+            update_jobs = []
+            for robot in robots.values():
+                update_jobs.append(_update_robot(robot))
 
-                next_wakeup = now + Duration(
-                    nanoseconds=update_period * 1e9
-                )
-                while node.get_clock().now() < next_wakeup:
-                    time.sleep(0.001)
-            except Exception as e:
-                node.get_logger().error(
-                    f'update_loop error: {e}'
-                )
-                time.sleep(1.0)
+            if not update_jobs:
+                time.sleep(update_period)
+                continue
+
+            asyncio.get_event_loop().run_until_complete(
+                asyncio.wait(update_jobs)
+            )
+
+            next_wakeup = now + Duration(
+                nanoseconds=update_period * 1e9
+            )
+            while node.get_clock().now() < next_wakeup:
+                time.sleep(0.001)
 
     update_thread = threading.Thread(
         target=update_loop, daemon=True
