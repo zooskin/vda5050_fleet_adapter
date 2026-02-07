@@ -56,12 +56,6 @@ def _update_robot(robot: RobotAdapter) -> None:
         )
         return
 
-    robot.node.get_logger().info(
-        f'[{robot.name}] data received - '
-        f'map: {data.map_name}, pos: {data.position}, '
-        f'battery: {data.battery_soc}'
-    )
-
     state = rmf_easy.RobotState(
         data.map_name, data.position, data.battery_soc
     )
@@ -78,8 +72,10 @@ def _update_robot(robot: RobotAdapter) -> None:
         )
         return
 
-    robot.node.get_logger().debug(
-        f'[{robot.name}] update_handle exists, updating state'
+    robot.node.get_logger().info(
+        f'[{robot.name}] updating state - '
+        f'pos: {data.position}, map: {data.map_name}, '
+        f'handle: {robot.update_handle}'
     )
     robot.update(state, data)
 
