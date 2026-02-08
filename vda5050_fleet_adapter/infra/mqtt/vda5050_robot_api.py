@@ -301,10 +301,15 @@ class Vda5050RobotAPI(RobotAPI):
         if state is None or order_or_action_id is None:
             return False
 
-        # Order 완료 확인: nodeStates가 비어있고 driving=False
+        # Order 완료 확인: released(base) 노드가 없고 driving=False
+        # Horizon 노드는 nodeStates에 남아있을 수 있으므로
+        # released 노드만 확인한다.
         if order_or_action_id.startswith('order_'):
             if state.order_id == order_or_action_id:
-                if not state.node_states and not state.driving:
+                has_released = any(
+                    ns.released for ns in state.node_states
+                )
+                if not has_released and not state.driving:
                     with self._lock:
                         self._completed_cmds.setdefault(
                             robot_name, set()

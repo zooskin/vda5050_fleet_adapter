@@ -251,19 +251,39 @@ class TestIsCommandCompleted:
 
         assert not api.is_command_completed('AGV-001', 1)
 
-    def test_order_not_completed_when_nodes_remain(self, api):
-        """남은 노드가 있으면 미완료."""
+    def test_order_not_completed_when_released_nodes_remain(self, api):
+        """Released(base) 노드가 남아있으면 미완료."""
         order_id = 'order_1_abc'
         api._cmd_order_map['AGV-001'] = {1: order_id}
 
+        released_node = MagicMock()
+        released_node.released = True
         state = MagicMock()
         state.order_id = order_id
-        state.node_states = [MagicMock()]
+        state.node_states = [released_node]
         state.driving = False
         state.action_states = []
         api._state_cache['AGV-001'] = state
 
         assert not api.is_command_completed('AGV-001', 1)
+
+    def test_order_completed_with_only_horizon_nodes(self, api):
+        """Horizon 노드만 남고 driving=False이면 완료."""
+        order_id = 'order_1_abc'
+        api._cmd_order_map['AGV-001'] = {1: order_id}
+
+        horizon_node1 = MagicMock()
+        horizon_node1.released = False
+        horizon_node2 = MagicMock()
+        horizon_node2.released = False
+        state = MagicMock()
+        state.order_id = order_id
+        state.node_states = [horizon_node1, horizon_node2]
+        state.driving = False
+        state.action_states = []
+        api._state_cache['AGV-001'] = state
+
+        assert api.is_command_completed('AGV-001', 1)
 
     def test_action_completed_when_finished(self, api):
         """Action status가 FINISHED이면 완료."""
