@@ -80,7 +80,17 @@ class TaskApiListener(TaskTracker):
             최종 목적지 waypoint 이름, 또는 아직 매핑 전이면 None.
         """
         with self._lock:
-            return self._booking_destinations.get(booking_id)
+            result = self._booking_destinations.get(booking_id)
+            if result is None:
+                logger.info(
+                    'get_final_destination: no mapping for '
+                    'booking_id=%s, cached_bookings=%s, '
+                    'pending_requests=%s',
+                    booking_id,
+                    list(self._booking_destinations.keys()),
+                    list(self._request_destinations.keys()),
+                )
+            return result
 
     def clear_booking(self, booking_id: str) -> None:
         """완료된 task의 캐시를 정리한다.
@@ -112,8 +122,15 @@ class TaskApiListener(TaskTracker):
                     'destination=%s',
                     request_id, destination,
                 )
+            else:
+                logger.info(
+                    'Task request has no extractable destination: '
+                    'request_id=%s, payload_keys=%s',
+                    request_id,
+                    list(payload.get('request', {}).keys()),
+                )
         except (json.JSONDecodeError, KeyError, TypeError):
-            logger.debug(
+            logger.warning(
                 'Could not parse task request: request_id=%s',
                 getattr(msg, 'request_id', 'unknown'),
             )
@@ -157,7 +174,7 @@ class TaskApiListener(TaskTracker):
                         booking_id, destination,
                     )
                 else:
-                    logger.debug(
+                    logger.warning(
                         'Response without matching request: '
                         'request_id=%s, booking_id=%s',
                         request_id, booking_id,

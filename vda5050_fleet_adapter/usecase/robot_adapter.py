@@ -373,11 +373,20 @@ class RobotAdapter:
             )
             return destination
 
-        logger.debug(
-            'No final destination from task_tracker for '
-            'robot=%s, task_id=%s, using fallback=%s',
-            self.name, task_id, fallback,
-        )
+        if destination is not None and destination not in self.nav_nodes:
+            logger.warning(
+                'Destination from task_tracker not in nav_nodes: '
+                'robot=%s, task_id=%s, destination=%s, '
+                'using fallback=%s',
+                self.name, task_id, destination, fallback,
+            )
+        else:
+            logger.warning(
+                'No final destination from task_tracker: '
+                'robot=%s, task_id=%s, destination=%s, '
+                'using fallback=%s',
+                self.name, task_id, destination, fallback,
+            )
         return fallback
 
     def _reset_order_state(self) -> None:
