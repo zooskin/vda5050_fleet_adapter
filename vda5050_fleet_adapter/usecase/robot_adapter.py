@@ -152,14 +152,20 @@ class RobotAdapter:
         self.execution = execution
         self.node.get_logger().info(
             f'[{self.name}] navigate callback called, '
-            f'dest={destination.position}, map={destination.map}'
+            f'dest={destination.position}, map={destination.map}, '
+            f'name={getattr(destination, "name", "")}'
         )
 
-        goal_node = find_nearest_node(
-            self.nav_nodes,
-            destination.position[0],
-            destination.position[1],
-        )
+        # Use destination.name for exact waypoint match (if available)
+        dest_name = getattr(destination, 'name', '')
+        if dest_name and dest_name in self.nav_nodes:
+            goal_node = dest_name
+        else:
+            goal_node = find_nearest_node(
+                self.nav_nodes,
+                destination.position[0],
+                destination.position[1],
+            )
 
         if goal_node is None:
             logger.error(
@@ -191,6 +197,13 @@ class RobotAdapter:
         else:
             # Order Update: 같은 orderID, update_id 증가
             self._order_update_id += 1
+            # Re-resolve: tracker may have received fleet_state
+            # data since the initial resolve
+            self._final_destination = (
+                self._resolve_final_destination(
+                    self._final_destination or goal_node
+                )
+            )
 
         # 현재 위치 기반으로 start_node 결정
         start_node = None

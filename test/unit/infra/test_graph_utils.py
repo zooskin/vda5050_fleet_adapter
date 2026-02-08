@@ -41,7 +41,7 @@ class TestParseNavGraph:
         with open(path, 'w') as f:
             yaml.dump(nav_data, f)
 
-        nodes, edges = parse_nav_graph(str(path))
+        nodes, edges, index_to_name = parse_nav_graph(str(path))
 
         assert len(nodes) == 3
         assert 'wp1' in nodes
@@ -51,6 +51,8 @@ class TestParseNavGraph:
         assert nodes['wp2']['x'] == 5.0
         # lane 1개당 edge 1개 (이미 방향별 분리)
         assert len(edges) == 4
+        # index_to_name 매핑 검증
+        assert index_to_name == ['wp1', 'wp2', 'wp3']
 
     def test_parse_unnamed_vertices(self, tmp_path):
         """이름 없는 정점은 node0, node1 등으로 생성된다."""
@@ -69,7 +71,7 @@ class TestParseNavGraph:
         with open(path, 'w') as f:
             yaml.dump(nav_data, f)
 
-        nodes, edges = parse_nav_graph(str(path))
+        nodes, edges, _ = parse_nav_graph(str(path))
 
         assert 'node0' in nodes
         assert 'node1' in nodes
@@ -95,7 +97,7 @@ class TestParseNavGraph:
         with open(path, 'w') as f:
             yaml.dump(nav_data, f)
 
-        nodes, edges = parse_nav_graph(str(path))
+        nodes, edges, _ = parse_nav_graph(str(path))
 
         assert len(nodes) == 3
         assert 'wp1' in nodes

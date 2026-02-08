@@ -1,6 +1,6 @@
 """ROS 2 Task API 리스너.
 
-/task_api_requests와 /task_api_responses 토픽을 구독하여
+/task_api_requests, /task_api_responses, /fleet_states 토픽을 구독하여
 Task의 최종 목적지를 추적한다.
 """
 
@@ -17,24 +17,34 @@ logger = logging.getLogger(__name__)
 
 
 class TaskApiListener(TaskTracker):
-    """ROS 2 Task API 토픽 기반 TaskTracker 구현.
+    """ROS 2 토픽 기반 TaskTracker 구현.
 
-    Correlation strategy:
-      1. /task_api_requests: request_id -> final_destination 캐시
-      2. /task_api_responses (TYPE_RESPONDING): request_id -> booking_id 매핑
-      3. 두 매핑을 결합하여 booking_id -> final_destination 생성
+    데이터 소스:
+      1. /task_api_requests + /task_api_responses: 외부 dispatch task의
+         request_id → booking_id → destination 상관관계.
+      2. /fleet_states: 내부 task (ParkRobot 등) 포함 모든 task의
+         task_id → path[-1] → destination 매핑.
 
     Args:
         node: ROS 2 노드 (구독 생성용).
+        fleet_name: Fleet 이름 (fleet_states 필터링용).
+        index_to_name: Nav graph vertex index → waypoint name 매핑.
     """
 
-    def __init__(self, node: Any) -> None:
+    def __init__(
+        self,
+        node: Any,
+        fleet_name: str = '',
+        index_to_name: list[str] | None = None,
+    ) -> None:
         self._node = node
+        self._fleet_name = fleet_name
+        self._index_to_name = index_to_name or []
         self._lock = threading.Lock()
 
         # Phase 1 cache: request_id -> destination waypoint name
         self._request_destinations: dict[str, str] = {}
-        # Phase 2 cache: booking_id -> destination waypoint name
+        # Final cache: booking_id/task_id -> destination waypoint name
         self._booking_destinations: dict[str, str] = {}
 
         self._setup_subscriptions()
@@ -45,6 +55,7 @@ class TaskApiListener(TaskTracker):
         from rclpy.qos import QoSHistoryPolicy as History
         from rclpy.qos import QoSProfile
         from rclpy.qos import QoSReliabilityPolicy as Reliability
+        from rmf_fleet_msgs.msg import FleetState
         from rmf_task_msgs.msg import ApiRequest, ApiResponse
 
         transient_qos = QoSProfile(
@@ -68,7 +79,26 @@ class TaskApiListener(TaskTracker):
             transient_qos,
         )
 
-        logger.info('TaskApiListener subscribed to task_api topics')
+        # fleet_states: 기본 QoS (RELIABLE, VOLATILE)
+        default_qos = QoSProfile(
+            history=History.KEEP_LAST,
+            depth=10,
+            reliability=Reliability.RELIABLE,
+            durability=Durability.VOLATILE,
+        )
+
+        self._node.create_subscription(
+            FleetState,
+            '/fleet_states',
+            self._on_fleet_state,
+            default_qos,
+        )
+
+        logger.info(
+            'TaskApiListener subscribed to task_api and fleet_states '
+            'topics (fleet=%s, index_to_name=%d entries)',
+            self._fleet_name, len(self._index_to_name),
+        )
 
     def get_final_destination(self, booking_id: str) -> str | None:
         """Task의 최종 목적지 waypoint 이름을 반환한다.
@@ -80,17 +110,7 @@ class TaskApiListener(TaskTracker):
             최종 목적지 waypoint 이름, 또는 아직 매핑 전이면 None.
         """
         with self._lock:
-            result = self._booking_destinations.get(booking_id)
-            if result is None:
-                logger.info(
-                    'get_final_destination: no mapping for '
-                    'booking_id=%s, cached_bookings=%s, '
-                    'pending_requests=%s',
-                    booking_id,
-                    list(self._booking_destinations.keys()),
-                    list(self._request_destinations.keys()),
-                )
-            return result
+            return self._booking_destinations.get(booking_id)
 
     def clear_booking(self, booking_id: str) -> None:
         """완료된 task의 캐시를 정리한다.
@@ -100,6 +120,41 @@ class TaskApiListener(TaskTracker):
         """
         with self._lock:
             self._booking_destinations.pop(booking_id, None)
+
+    def _on_fleet_state(self, msg: Any) -> None:
+        """Fleet_states 콜백.
+
+        각 로봇의 planned path 마지막 waypoint에서
+        최종 목적지를 추출한다.
+
+        Args:
+            msg: rmf_fleet_msgs/msg/FleetState 메시지.
+        """
+        if self._fleet_name and msg.name != self._fleet_name:
+            return
+
+        if not self._index_to_name:
+            return
+
+        for robot_state in msg.robots:
+            task_id = robot_state.task_id
+            if not task_id or not robot_state.path:
+                continue
+
+            last_loc = robot_state.path[-1]
+            idx = int(last_loc.index)
+            if idx >= len(self._index_to_name):
+                continue
+
+            dest_name = self._index_to_name[idx]
+            with self._lock:
+                if task_id not in self._booking_destinations:
+                    self._booking_destinations[task_id] = dest_name
+                    logger.info(
+                        'Fleet state destination: task_id=%s, '
+                        'robot=%s, destination=%s (index=%d)',
+                        task_id, robot_state.name, dest_name, idx,
+                    )
 
     def _on_task_request(self, msg: Any) -> None:
         """Task_api_requests 콜백.

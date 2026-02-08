@@ -17,7 +17,11 @@ from vda5050_fleet_adapter.infra.ros.task_api_listener import (
 def listener():
     """Create listener with mocked ROS subscriptions."""
     with patch.object(TaskApiListener, '_setup_subscriptions'):
-        return TaskApiListener(MagicMock())
+        return TaskApiListener(
+            MagicMock(),
+            fleet_name='tinyRobot',
+            index_to_name=['wp1', 'wp2', 'charger1', 'wp3'],
+        )
 
 
 class TestExtractDestination:
@@ -229,3 +233,111 @@ class TestClearBooking:
     def test_clear_nonexistent_is_safe(self, listener):
         """존재하지 않는 booking 정리는 안전하다."""
         listener.clear_booking('nonexistent')
+
+
+class TestOnFleetState:
+    """_on_fleet_state() 콜백 테스트."""
+
+    def test_extracts_destination_from_path(self, listener):
+        """Fleet state의 path[-1].index에서 목적지를 추출한다."""
+        last_loc = MagicMock()
+        last_loc.index = 2  # index 2 → 'charger1'
+
+        robot_state = MagicMock()
+        robot_state.name = 'AGV-001'
+        robot_state.task_id = 'ParkRobot-abc123'
+        robot_state.path = [MagicMock(), last_loc]
+
+        msg = MagicMock()
+        msg.name = 'tinyRobot'
+        msg.robots = [robot_state]
+
+        listener._on_fleet_state(msg)
+
+        assert listener.get_final_destination(
+            'ParkRobot-abc123'
+        ) == 'charger1'
+
+    def test_ignores_different_fleet(self, listener):
+        """다른 fleet의 메시지는 무시한다."""
+        robot_state = MagicMock()
+        robot_state.name = 'AGV-001'
+        robot_state.task_id = 'task-1'
+        robot_state.path = [MagicMock()]
+
+        msg = MagicMock()
+        msg.name = 'otherFleet'
+        msg.robots = [robot_state]
+
+        listener._on_fleet_state(msg)
+
+        assert listener.get_final_destination('task-1') is None
+
+    def test_ignores_robot_without_task(self, listener):
+        """task_id가 없는 로봇은 무시한다."""
+        robot_state = MagicMock()
+        robot_state.name = 'AGV-001'
+        robot_state.task_id = ''
+        robot_state.path = [MagicMock()]
+
+        msg = MagicMock()
+        msg.name = 'tinyRobot'
+        msg.robots = [robot_state]
+
+        listener._on_fleet_state(msg)
+
+        assert not listener._booking_destinations
+
+    def test_ignores_robot_without_path(self, listener):
+        """path가 없는 로봇은 무시한다."""
+        robot_state = MagicMock()
+        robot_state.name = 'AGV-001'
+        robot_state.task_id = 'task-1'
+        robot_state.path = []
+
+        msg = MagicMock()
+        msg.name = 'tinyRobot'
+        msg.robots = [robot_state]
+
+        listener._on_fleet_state(msg)
+
+        assert not listener._booking_destinations
+
+    def test_ignores_out_of_range_index(self, listener):
+        """index가 범위를 초과하면 무시한다."""
+        last_loc = MagicMock()
+        last_loc.index = 99  # out of range
+
+        robot_state = MagicMock()
+        robot_state.name = 'AGV-001'
+        robot_state.task_id = 'task-1'
+        robot_state.path = [last_loc]
+
+        msg = MagicMock()
+        msg.name = 'tinyRobot'
+        msg.robots = [robot_state]
+
+        listener._on_fleet_state(msg)
+
+        assert not listener._booking_destinations
+
+    def test_does_not_overwrite_existing_mapping(self, listener):
+        """이미 매핑된 task_id는 덮어쓰지 않는다."""
+        listener._booking_destinations['task-1'] = 'pantry'
+
+        last_loc = MagicMock()
+        last_loc.index = 2  # 'charger1'
+
+        robot_state = MagicMock()
+        robot_state.name = 'AGV-001'
+        robot_state.task_id = 'task-1'
+        robot_state.path = [last_loc]
+
+        msg = MagicMock()
+        msg.name = 'tinyRobot'
+        msg.robots = [robot_state]
+
+        listener._on_fleet_state(msg)
+
+        # task_api correlation takes priority
+        assert listener.get_final_destination('task-1') == 'pantry'

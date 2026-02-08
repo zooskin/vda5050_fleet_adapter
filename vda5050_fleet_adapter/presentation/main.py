@@ -146,7 +146,7 @@ def main(argv: list[str] | None = None) -> None:
     time.sleep(1.0)
 
     # 4. Nav graph 파싱
-    nav_nodes, nav_edges = parse_nav_graph(nav_graph_path)
+    nav_nodes, nav_edges, index_to_name = parse_nav_graph(nav_graph_path)
     nav_graph = create_graph(nav_nodes, nav_edges)
 
     # 5. 좌표 변환 (reference_coordinates 있으면)
@@ -192,7 +192,7 @@ def main(argv: list[str] | None = None) -> None:
     )
 
     # 7.5. Task API Listener 생성
-    task_tracker = TaskApiListener(node)
+    task_tracker = TaskApiListener(node, fleet_name, index_to_name)
 
     # 8. 로봇별 RobotAdapter 생성
     node.get_logger().info(f'known_robots: {fleet_config.known_robots}')

@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 def parse_nav_graph(
     nav_graph_path: str, level: str = 'L1'
-) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]], list[str]]:
     """RMF 내비게이션 그래프 파일을 파싱한다.
 
     Args:
@@ -31,9 +31,10 @@ def parse_nav_graph(
         level: 사용할 레벨 이름.
 
     Returns:
-        (nodes, edges) 튜플.
+        (nodes, edges, index_to_name) 튜플.
         nodes: {name: {x, y, attributes}} 형태.
         edges: {name: {start, end, attributes}} 형태.
+        index_to_name: vertex index → waypoint name 매핑 리스트.
     """
     with open(nav_graph_path, 'r') as f:
         nav_graph = yaml.safe_load(f)
@@ -72,7 +73,7 @@ def parse_nav_graph(
     logger.info(
         'Parsed nav graph: %d nodes, %d edges', len(nodes), len(edges)
     )
-    return nodes, edges
+    return nodes, edges, index_to_name
 
 
 def compute_transforms(
