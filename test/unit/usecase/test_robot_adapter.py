@@ -283,15 +283,54 @@ class TestRobotAdapterUpdate:
         execution.finished.assert_called_once()
         assert adapter.execution is None
 
-    def test_completion_resets_order_state(self, adapter, mock_api):
-        """명령 완료 시 order 상태가 초기화된다."""
+    def test_completion_preserves_order_during_task(
+        self, adapter, mock_api
+    ):
+        """명령 완료 시 task 중에는 order 상태가 유지된다."""
         execution = MagicMock()
         adapter.execution = execution
         adapter.cmd_id = 5
-        adapter.update_handle = MagicMock()
+        mock_update_handle = MagicMock()
+        mock_update_handle.more.return_value.current_task_id \
+            .return_value = 'compose.dispatch-001'
+        adapter.update_handle = mock_update_handle
         adapter._active_order_id = 'order_5_abc'
         adapter._order_update_id = 1
         adapter._final_destination = 'wp3'
+        adapter._current_task_id = 'compose.dispatch-001'
+        mock_api.is_command_completed.return_value = True
+
+        state = MagicMock()
+        data = RobotUpdateData(
+            robot_name='AGV-001',
+            map_name='map1',
+            position=[1.0, 2.0, 0.0],
+            battery_soc=0.85,
+        )
+
+        adapter.update(state, data)
+
+        execution.finished.assert_called_once()
+        assert adapter.execution is None
+        # Order state preserved (task still active)
+        assert adapter._active_order_id == 'order_5_abc'
+
+    def test_completion_resets_order_when_task_ends(
+        self, adapter, mock_api
+    ):
+        """Task 완료 시 order 상태가 초기화된다."""
+        execution = MagicMock()
+        adapter.execution = execution
+        adapter.cmd_id = 5
+        mock_update_handle = MagicMock()
+        # current_task_id returns empty string (task ended)
+        mock_update_handle.more.return_value.current_task_id \
+            .return_value = ''
+        adapter.update_handle = mock_update_handle
+        adapter._active_order_id = 'order_5_abc'
+        adapter._order_update_id = 1
+        adapter._final_destination = 'wp3'
+        adapter._current_task_id = 'compose.dispatch-001'
         mock_api.is_command_completed.return_value = True
 
         state = MagicMock()
@@ -374,7 +413,9 @@ class TestRobotAdapterRetry:
         def failing_then_success(*args):
             nonlocal call_count
             call_count += 1
-            return call_count >= 2
+            if call_count >= 2:
+                return RobotAPIResult.SUCCESS
+            return RobotAPIResult.RETRY
 
         mock_api.navigate.side_effect = failing_then_success
 
@@ -402,3 +443,189 @@ class TestRobotAdapterRetry:
         adapter.cancel_cmd_attempt()
 
         assert adapter._issue_cmd_thread is None
+
+
+@pytest.fixture
+def mock_task_tracker():
+    """Mock TaskTracker."""
+    tracker = MagicMock()
+    tracker.get_final_destination.return_value = None
+    tracker.clear_booking = MagicMock()
+    return tracker
+
+
+@pytest.fixture
+def adapter_with_tracker(
+    mock_api, mock_node, mock_task_tracker,
+    sample_nav_nodes, sample_nav_edges,
+):
+    """Create RobotAdapter with task_tracker."""
+    from vda5050_fleet_adapter.infra.nav_graph.graph_utils import (
+        create_graph,
+    )
+    graph = create_graph(sample_nav_nodes, sample_nav_edges)
+    robot = RobotAdapter(
+        name='AGV-001',
+        api=mock_api,
+        node=mock_node,
+        fleet_handle=MagicMock(),
+        nav_nodes=sample_nav_nodes,
+        nav_edges=sample_nav_edges,
+        nav_graph=graph,
+        task_tracker=mock_task_tracker,
+    )
+    robot.configuration = MagicMock()
+    mock_update_handle = MagicMock()
+    mock_update_handle.more.return_value.current_task_id \
+        .return_value = 'compose.dispatch-001'
+    robot.update_handle = mock_update_handle
+    return robot
+
+
+class TestTaskTrackerIntegration:
+    """task_tracker를 사용한 navigate 테스트."""
+
+    def test_uses_tracker_destination(
+        self, adapter_with_tracker, mock_task_tracker
+    ):
+        """Task_tracker가 있을 때 최종 목적지를 사용한다."""
+        mock_task_tracker.get_final_destination.return_value = 'wp4'
+
+        dest = MagicMock()
+        dest.position = [5.0, 0.0, 0.0]
+        dest.map = 'map1'
+        execution = MagicMock()
+
+        adapter_with_tracker.position = [0.0, 0.0, 0.0]
+        adapter_with_tracker.navigate(dest, execution)
+        adapter_with_tracker.cancel_cmd_attempt()
+
+        assert adapter_with_tracker._final_destination == 'wp4'
+
+    def test_falls_back_without_tracker_result(
+        self, adapter_with_tracker, mock_task_tracker
+    ):
+        """Task_tracker가 None 반환 시 goal_node를 사용한다."""
+        mock_task_tracker.get_final_destination.return_value = None
+
+        dest = MagicMock()
+        dest.position = [5.0, 0.0, 0.0]
+        dest.map = 'map1'
+        execution = MagicMock()
+
+        adapter_with_tracker.position = [0.0, 0.0, 0.0]
+        adapter_with_tracker.navigate(dest, execution)
+        adapter_with_tracker.cancel_cmd_attempt()
+
+        assert adapter_with_tracker._final_destination == 'wp2'
+
+    def test_backward_compat_without_tracker(self, adapter):
+        """Task_tracker 없이도 동작한다."""
+        dest = MagicMock()
+        dest.position = [5.0, 0.0, 0.0]
+        dest.map = 'map1'
+        execution = MagicMock()
+
+        adapter.navigate(dest, execution)
+        adapter.cancel_cmd_attempt()
+
+        assert adapter._final_destination is not None
+
+
+class TestOrderLifecycle:
+    """Order 라이프사이클 관리 테스트."""
+
+    def test_order_preserved_across_navigates(
+        self, adapter_with_tracker, mock_api
+    ):
+        """같은 task 내에서 order가 유지된다."""
+        adapter_with_tracker.position = [0.0, 0.0, 0.0]
+
+        dest1 = MagicMock()
+        dest1.position = [5.0, 0.0, 0.0]
+        dest1.map = 'map1'
+        exec1 = MagicMock()
+        adapter_with_tracker.navigate(dest1, exec1)
+        adapter_with_tracker.cancel_cmd_attempt()
+
+        order_id = adapter_with_tracker._active_order_id
+
+        # Command 완료 시뮬레이션
+        mock_api.is_command_completed.return_value = True
+        state = MagicMock()
+        data = RobotUpdateData(
+            robot_name='AGV-001', map_name='map1',
+            position=[5.0, 0.0, 0.0], battery_soc=0.85,
+        )
+        adapter_with_tracker.update(state, data)
+
+        # Order state 유지 (task 아직 active)
+        assert adapter_with_tracker._active_order_id == order_id
+
+    def test_order_update_id_increments(
+        self, adapter_with_tracker, mock_api
+    ):
+        """같은 task 내 두 번째 navigate에서 update_id 증가."""
+        adapter_with_tracker.position = [0.0, 0.0, 0.0]
+
+        dest1 = MagicMock()
+        dest1.position = [5.0, 0.0, 0.0]
+        dest1.map = 'map1'
+        exec1 = MagicMock()
+        adapter_with_tracker.navigate(dest1, exec1)
+        adapter_with_tracker.cancel_cmd_attempt()
+
+        order_id = adapter_with_tracker._active_order_id
+        assert adapter_with_tracker._order_update_id == 0
+
+        dest2 = MagicMock()
+        dest2.position = [5.0, 5.0, 0.0]
+        dest2.map = 'map1'
+        exec2 = MagicMock()
+        adapter_with_tracker.navigate(dest2, exec2)
+        adapter_with_tracker.cancel_cmd_attempt()
+
+        assert adapter_with_tracker._active_order_id == order_id
+        assert adapter_with_tracker._order_update_id == 1
+
+    def test_stop_resets_order_and_clears_booking(
+        self, adapter_with_tracker, mock_task_tracker
+    ):
+        """Stop 시 order 리셋 및 booking 캐시 정리."""
+        execution = MagicMock()
+        activity = MagicMock()
+        execution.identifier.is_same.return_value = True
+        adapter_with_tracker.execution = execution
+        adapter_with_tracker._active_order_id = 'order_1_abc'
+        adapter_with_tracker._current_task_id = 'compose.dispatch-001'
+
+        adapter_with_tracker.stop(activity)
+        adapter_with_tracker.cancel_cmd_attempt()
+
+        assert adapter_with_tracker._active_order_id is None
+        mock_task_tracker.clear_booking.assert_called_once_with(
+            'compose.dispatch-001'
+        )
+
+
+class TestStartNodeFix:
+    """Start_node 결정 로직 테스트."""
+
+    def test_uses_current_position(
+        self, adapter_with_tracker, mock_api
+    ):
+        """Navigate에서 현재 위치를 start_node로 사용한다."""
+        adapter_with_tracker.position = [0.0, 0.0, 0.0]
+
+        dest = MagicMock()
+        dest.position = [5.0, 0.0, 0.0]
+        dest.map = 'map1'
+        execution = MagicMock()
+        adapter_with_tracker.navigate(dest, execution)
+        adapter_with_tracker.cancel_cmd_attempt()
+
+        call_args = mock_api.navigate.call_args[0]
+        nodes = call_args[2]
+        # First node should be wp1 (nearest to 0,0)
+        if nodes:
+            assert nodes[0].node_id == 'wp1'

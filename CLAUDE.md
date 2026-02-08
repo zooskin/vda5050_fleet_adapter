@@ -84,6 +84,12 @@ python -m pytest test/
 - order의 생성 범위 : order에 rmf core에서 내려온 Destination까지를 Base로 만들고 나머지 최종 목적지까지의 경로를 horizon으로 만든다. 
 - order update 시 : rmf core에서 새로운 Destination이 내려오면 해당 Destination까지 Base로 만들고 나머지 최종 목적지까지의 경로를 horizon으로 만든다. 
 - 최종 목적지 란 : 최종목적지는, rmf core에 명령 넣은 로봇의 최종 도착지 이다. 예를 들어 ros2 run rmf_demos_tasks dispatch_go_to_place -p pantry 이렇게 터미널에서 명령을 주면 "pantry"가 최종 목적지가 된다. 
+- order 예시 : 
+  - 최종목적지 = 5, 로봇 출발지 1 , 중간 경유지 2,3,4
+  - 첫번쨰 waypoint가 3이면 실제 명령은 1(base)-2(base)-3(base)-4(horizon)-5(horizon)
+  - 3번 까지 도착 후 두번째 waypoint가 4이면 실제 명령은 3(base)-4(base)-5(horizon)
+  - 4번 까지 도착 후 두번째 waypoint가 5이면 실제 명령은 4(base)-5(base)
+  
 - negotiation 발생 시 규칙 : rmf에서 negotiation이 발생하면 아래 순서를 따른다
   1. 발생 로봇에 startPause instantAction을 내린다.
   2. 이후 새로운 Destination이 내려오면 로봇에 cancelOrder instantAction을 내린다.

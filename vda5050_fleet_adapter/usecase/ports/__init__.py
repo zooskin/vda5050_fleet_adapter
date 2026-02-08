@@ -14,6 +14,7 @@ from vda5050_fleet_adapter.usecase.ports.robot_api import (
     RobotAPIResult,
     RobotUpdateData,
 )
+from vda5050_fleet_adapter.usecase.ports.task_tracker import TaskTracker
 
 __all__ = [
     'ConfigPort',
@@ -23,4 +24,5 @@ __all__ = [
     'RobotAPI',
     'RobotAPIResult',
     'RobotUpdateData',
+    'TaskTracker',
 ]

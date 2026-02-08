@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import logging
 import threading
-import uuid
 from typing import Any
+import uuid
 
 from vda5050_fleet_adapter.infra.nav_graph.graph_utils import (
     build_vda5050_nodes_edges,
@@ -21,6 +21,7 @@ from vda5050_fleet_adapter.usecase.ports.robot_api import (
     RobotAPI,
     RobotUpdateData,
 )
+from vda5050_fleet_adapter.usecase.ports.task_tracker import TaskTracker
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +40,7 @@ class RobotAdapter:
         nav_nodes: nav graph 노드 dict.
         nav_edges: nav graph 엣지 dict.
         nav_graph: networkx 그래프.
+        task_tracker: Task 최종 목적지 추적기 (optional).
     """
 
     def __init__(
@@ -50,6 +52,7 @@ class RobotAdapter:
         nav_nodes: dict,
         nav_edges: dict,
         nav_graph: Any,
+        task_tracker: TaskTracker | None = None,
     ) -> None:
         self.name = name
         self.api = api
@@ -58,6 +61,7 @@ class RobotAdapter:
         self.nav_nodes = nav_nodes
         self.nav_edges = nav_edges
         self.nav_graph = nav_graph
+        self.task_tracker = task_tracker
 
         self.execution: Any | None = None
         self.update_handle: Any | None = None
@@ -69,6 +73,7 @@ class RobotAdapter:
         self._active_order_id: str | None = None
         self._order_update_id: int = 0
         self._final_destination: str | None = None
+        self._current_task_id: str | None = None
 
         # 명령 재시도 스레드 관리
         self._issue_cmd_thread: threading.Thread | None = None
@@ -81,6 +86,7 @@ class RobotAdapter:
         """주기적 상태 업데이트.
 
         명령 완료를 감지하고 RMF에 상태를 보고한다.
+        Order 상태는 task 단위로만 리셋한다 (command 완료 시 리셋하지 않음).
 
         Args:
             state: rmf_easy.RobotState 인스턴스.
@@ -93,11 +99,22 @@ class RobotAdapter:
             if self.api.is_command_completed(self.name, self.cmd_id):
                 self.execution.finished()
                 self.execution = None
-                self._active_order_id = None
-                self._order_update_id = 0
-                self._final_destination = None
             else:
                 activity_identifier = self.execution.identifier
+
+        # Task 완료 감지: task_id가 변경되거나 비어있으면 order 리셋
+        if self._active_order_id is not None and self.execution is None:
+            current_task_id = self._get_current_task_id()
+            task_ended = (
+                current_task_id is None
+                or current_task_id == ''
+                or (
+                    self._current_task_id is not None
+                    and current_task_id != self._current_task_id
+                )
+            )
+            if task_ended:
+                self._reset_order_state()
 
         if self.update_handle is not None:
             self.update_handle.update(state, activity_identifier)
@@ -151,23 +168,33 @@ class RobotAdapter:
             )
             return
 
-        # 새 Task vs Order Update 판별
-        if self._active_order_id is None:
-            # 새 Task: 첫 navigate의 destination이 최종 목적지
-            self._final_destination = goal_node
+        # Task 경계 감지: current_task_id 변경 시 새 Task
+        current_task_id = self._get_current_task_id()
+        is_new_task = (
+            self._active_order_id is None
+            or (
+                current_task_id
+                and current_task_id != self._current_task_id
+            )
+        )
+
+        if is_new_task:
+            self._current_task_id = current_task_id
+            self._final_destination = (
+                self._resolve_final_destination(goal_node)
+            )
             self._active_order_id = (
                 f'order_{self.cmd_id}_{uuid.uuid4().hex[:8]}'
             )
             self._order_update_id = 0
+            self._last_nodes = []
         else:
             # Order Update: 같은 orderID, update_id 증가
             self._order_update_id += 1
 
-        # 현재 위치에서 가장 가까운 노드 찾기
+        # 현재 위치 기반으로 start_node 결정
         start_node = None
-        if self._last_nodes:
-            start_node = self._last_nodes[-1][0]
-        elif self.position is not None:
+        if self.position is not None:
             start_node = find_nearest_node(
                 self.nav_nodes, self.position[0], self.position[1]
             )
@@ -234,9 +261,7 @@ class RobotAdapter:
         if self.execution is not None:
             if self.execution.identifier.is_same(activity):
                 self.execution = None
-                self._active_order_id = None
-                self._order_update_id = 0
-                self._final_destination = None
+                self._reset_order_state()
                 self.cmd_id += 1
                 self.attempt_cmd_until_success(
                     cmd=self.api.stop,
@@ -304,6 +329,71 @@ class RobotAdapter:
             target=loop, daemon=True
         )
         self._issue_cmd_thread.start()
+
+    def _get_current_task_id(self) -> str | None:
+        """현재 RMF task ID를 조회한다.
+
+        Returns:
+            현재 task의 booking_id 또는 None.
+        """
+        if self.update_handle is None:
+            return None
+        try:
+            return self.update_handle.more().current_task_id()
+        except Exception:
+            logger.debug(
+                'Could not get current_task_id for %s', self.name
+            )
+            return None
+
+    def _resolve_final_destination(self, fallback: str) -> str:
+        """Task_tracker에서 최종 목적지를 조회한다.
+
+        Task_tracker가 없거나 매핑이 없으면 fallback을 사용한다.
+
+        Args:
+            fallback: 조회 실패 시 사용할 목적지 (goal_node).
+
+        Returns:
+            최종 목적지 waypoint 이름.
+        """
+        if self.task_tracker is None:
+            return fallback
+
+        task_id = self._get_current_task_id()
+        if task_id is None:
+            return fallback
+
+        destination = self.task_tracker.get_final_destination(task_id)
+        if destination is not None and destination in self.nav_nodes:
+            logger.info(
+                'Final destination from task_tracker: '
+                'robot=%s, task_id=%s, destination=%s',
+                self.name, task_id, destination,
+            )
+            return destination
+
+        logger.debug(
+            'No final destination from task_tracker for '
+            'robot=%s, task_id=%s, using fallback=%s',
+            self.name, task_id, fallback,
+        )
+        return fallback
+
+    def _reset_order_state(self) -> None:
+        """Order 라이프사이클 상태를 초기화한다."""
+        old_task_id = self._current_task_id
+        if self.task_tracker is not None and old_task_id:
+            self.task_tracker.clear_booking(old_task_id)
+        self._active_order_id = None
+        self._order_update_id = 0
+        self._final_destination = None
+        self._current_task_id = None
+        self._last_nodes = []
+        logger.info(
+            'Order state reset for robot %s (task_id=%s)',
+            self.name, old_task_id,
+        )
 
     def cancel_cmd_attempt(self) -> None:
         """진행 중인 명령 재시도를 취소한다."""
