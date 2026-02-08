@@ -77,3 +77,14 @@ python -m pytest test/
 - MQTT QoS: use QoS 1 for state/visualization, QoS 2 for orders/instant actions
 - All config values must be loadable from YAML parameters, no hardcoded values
 - Thread safety: use `threading.Lock` for shared state between MQTT callbacks and ROS 2 callbacks
+
+## VDA5050 order 생성시 지켜야할 규칙
+- order의 단위 : rmf의 한개의 Task가 하나의 order단위다 되어야한다. 예를 들어 rmf에 go_to_place명령이 들어올경우 로봇으로 전달 되는 orderID는 하나여야 한다.
+- order의 단위 예외사항 : rmf core의 기능을 통해 로봇이 다른 로봇 및 특정상황에서 기존 경로가 변경이 일어날경우 기존 order를 cancel 시키고 다른 orderid로 새로 내린다. 
+- order의 생성 범위 : order에 rmf core에서 내려온 Destination까지를 Base로 만들고 나머지 최종 목적지까지의 경로를 horizon으로 만든다. 
+- order update 시 : rmf core에서 새로운 Destination이 내려오면 해당 Destination까지 Base로 만들고 나머지 최종 목적지까지의 경로를 horizon으로 만든다. 
+- 최종 목적지 란 : 최종목적지는, rmf core에 명령 넣은 로봇의 최종 도착지 이다. 예를 들어 ros2 run rmf_demos_tasks dispatch_go_to_place -p pantry 이렇게 터미널에서 명령을 주면 "pantry"가 최종 목적지가 된다. 
+- negotiation 발생 시 규칙 : rmf에서 negotiation이 발생하면 아래 순서를 따른다
+  1. 발생 로봇에 startPause instantAction을 내린다.
+  2. 이후 새로운 Destination이 내려오면 로봇에 cancelOrder instantAction을 내린다.
+  3. 이후 위 order 생성 규칙을 통해 order를 생성하여 로봇을 움직인다. 단 이경우 새로운 orderID로 명령을 내린다.
