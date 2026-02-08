@@ -100,6 +100,55 @@ class TestNavigate:
         api.navigate('AGV-001', 42, nodes, [], 'map1')
         assert 42 in api._cmd_order_map.get('AGV-001', {})
 
+    def test_navigate_uses_provided_order_id(self, api, mock_mqtt):
+        """제공된 order_id를 사용한다."""
+        nodes = [
+            Node(
+                node_id='wp1', sequence_id=0, released=True,
+                node_position=NodePosition(x=0.0, y=0.0, map_id='map1'),
+            ),
+        ]
+        result = api.navigate(
+            'AGV-001', 1, nodes, [], 'map1',
+            order_id='custom_order_123',
+        )
+
+        assert result == RobotAPIResult.SUCCESS
+        payload = mock_mqtt.publish.call_args[0][1]
+        data = json.loads(payload)
+        assert data['orderId'] == 'custom_order_123'
+
+    def test_navigate_auto_generates_order_id_when_empty(self, api, mock_mqtt):
+        """order_id가 빈 문자열이면 자동 생성한다."""
+        nodes = [
+            Node(
+                node_id='wp1', sequence_id=0, released=True,
+                node_position=NodePosition(x=0.0, y=0.0, map_id='map1'),
+            ),
+        ]
+        api.navigate('AGV-001', 5, nodes, [], 'map1', order_id='')
+
+        payload = mock_mqtt.publish.call_args[0][1]
+        data = json.loads(payload)
+        assert data['orderId'].startswith('order_5_')
+
+    def test_navigate_uses_provided_order_update_id(self, api, mock_mqtt):
+        """order_update_id가 payload에 반영된다."""
+        nodes = [
+            Node(
+                node_id='wp1', sequence_id=0, released=True,
+                node_position=NodePosition(x=0.0, y=0.0, map_id='map1'),
+            ),
+        ]
+        api.navigate(
+            'AGV-001', 1, nodes, [], 'map1',
+            order_id='order_1_abc', order_update_id=3,
+        )
+
+        payload = mock_mqtt.publish.call_args[0][1]
+        data = json.loads(payload)
+        assert data['orderUpdateId'] == 3
+
 
 class TestStop:
     """stop() 테스트."""

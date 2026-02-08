@@ -273,29 +273,40 @@ def build_vda5050_nodes_edges(
     nodes: dict[str, dict[str, Any]],
     map_id: str,
     seq_start: int = 0,
+    base_end_index: int | None = None,
 ) -> tuple[list[Node], list[Edge]]:
     """경로에서 VDA5050 Node/Edge 목록을 생성한다.
+
+    Base/Horizon 분리: base_end_index 이하의 노드는 Base(released=True),
+    초과하는 노드는 Horizon(released=False)으로 설정된다.
+    엣지는 end 노드의 released 상태를 따른다 (i < base_end_index면 Base).
 
     Args:
         path: 노드 이름 리스트 (경로).
         nodes: 노드 dict (좌표 포함).
         map_id: 맵 ID.
         seq_start: 시작 시퀀스 번호.
+        base_end_index: 마지막 Base 노드의 path 인덱스.
+            None이면 모든 노드를 Base로 설정 (기존 동작).
 
     Returns:
         (vda_nodes, vda_edges) 튜플.
     """
+    if base_end_index is None:
+        base_end_index = len(path) - 1
+
     vda_nodes: list[Node] = []
     vda_edges: list[Edge] = []
 
     for i, node_name in enumerate(path):
         seq = seq_start + i * 2
         nd = nodes[node_name]
+        released = (i <= base_end_index)
         vda_nodes.append(
             Node(
                 node_id=node_name,
                 sequence_id=seq,
-                released=True,
+                released=released,
                 node_position=NodePosition(
                     x=nd['x'],
                     y=nd['y'],
@@ -307,11 +318,12 @@ def build_vda5050_nodes_edges(
     for i in range(len(path) - 1):
         seq = seq_start + i * 2 + 1
         edge_id = f'{path[i]}_{path[i + 1]}_{uuid.uuid4().hex[:8]}'
+        released = (i < base_end_index)
         vda_edges.append(
             Edge(
                 edge_id=edge_id,
                 sequence_id=seq,
-                released=True,
+                released=released,
                 start_node_id=path[i],
                 end_node_id=path[i + 1],
             )

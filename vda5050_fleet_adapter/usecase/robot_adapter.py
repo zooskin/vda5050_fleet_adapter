@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import uuid
 from typing import Any
 
 from vda5050_fleet_adapter.infra.nav_graph.graph_utils import (
@@ -64,6 +65,11 @@ class RobotAdapter:
         self.cmd_id: int = 0
         self.position: list[float] | None = None
 
+        # Order 라이프사이클 관리
+        self._active_order_id: str | None = None
+        self._order_update_id: int = 0
+        self._final_destination: str | None = None
+
         # 명령 재시도 스레드 관리
         self._issue_cmd_thread: threading.Thread | None = None
         self._cancel_cmd_event = threading.Event()
@@ -87,6 +93,9 @@ class RobotAdapter:
             if self.api.is_command_completed(self.name, self.cmd_id):
                 self.execution.finished()
                 self.execution = None
+                self._active_order_id = None
+                self._order_update_id = 0
+                self._final_destination = None
             else:
                 activity_identifier = self.execution.identifier
 
@@ -115,6 +124,8 @@ class RobotAdapter:
         """RMF 내비게이션 콜백.
 
         목적지까지의 VDA5050 Order를 생성하여 전송한다.
+        Base/Horizon 분리: RMF Destination까지 Base, 최종 목적지까지 Horizon.
+        1 RMF Task = 1 orderID (새 Destination 시 order_update_id 증가).
 
         Args:
             destination: RMF destination (position, map, dock 등).
@@ -140,6 +151,18 @@ class RobotAdapter:
             )
             return
 
+        # 새 Task vs Order Update 판별
+        if self._active_order_id is None:
+            # 새 Task: 첫 navigate의 destination이 최종 목적지
+            self._final_destination = goal_node
+            self._active_order_id = (
+                f'order_{self.cmd_id}_{uuid.uuid4().hex[:8]}'
+            )
+            self._order_update_id = 0
+        else:
+            # Order Update: 같은 orderID, update_id 증가
+            self._order_update_id += 1
+
         # 현재 위치에서 가장 가까운 노드 찾기
         start_node = None
         if self._last_nodes:
@@ -152,15 +175,23 @@ class RobotAdapter:
         if start_node is None:
             start_node = goal_node
 
-        # 경로 계산
-        path = compute_path(self.nav_graph, start_node, goal_node)
+        # 경로 계산: current → final_destination
+        target = self._final_destination or goal_node
+        path = compute_path(self.nav_graph, start_node, target)
         if path is None:
-            path = [start_node, goal_node]
+            path = [start_node, target]
 
-        # VDA5050 Node/Edge 생성
+        # goal_node의 path 내 인덱스 찾기 → base_end_index
+        if goal_node in path:
+            base_end_index = path.index(goal_node)
+        else:
+            base_end_index = len(path) - 1
+
+        # VDA5050 Node/Edge 생성 (Base/Horizon 분리)
         map_name = destination.map
         vda_nodes, vda_edges = build_vda5050_nodes_edges(
-            path, self.nav_nodes, map_name
+            path, self.nav_nodes, map_name,
+            base_end_index=base_end_index,
         )
 
         # 경로 캐시 업데이트
@@ -170,10 +201,13 @@ class RobotAdapter:
         ]
 
         logger.info(
-            'Navigate [%s]: cmd_id=%d, dest=%s, map=%s, '
-            'path=%s',
-            self.name, self.cmd_id, destination.position,
-            map_name, path,
+            'Navigate [%s]: cmd_id=%d, order_id=%s, '
+            'order_update_id=%d, dest=%s, final_dest=%s, '
+            'map=%s, path=%s, base_end_index=%d',
+            self.name, self.cmd_id, self._active_order_id,
+            self._order_update_id, destination.position,
+            self._final_destination, map_name, path,
+            base_end_index,
         )
 
         self.attempt_cmd_until_success(
@@ -184,11 +218,15 @@ class RobotAdapter:
                 vda_nodes,
                 vda_edges,
                 map_name,
+                self._active_order_id,
+                self._order_update_id,
             ),
         )
 
     def stop(self, activity: Any) -> None:
         """RMF 정지 콜백.
+
+        Order 상태를 초기화하고 cancelOrder를 전송한다.
 
         Args:
             activity: 정지할 activity identifier.
@@ -196,6 +234,9 @@ class RobotAdapter:
         if self.execution is not None:
             if self.execution.identifier.is_same(activity):
                 self.execution = None
+                self._active_order_id = None
+                self._order_update_id = 0
+                self._final_destination = None
                 self.cmd_id += 1
                 self.attempt_cmd_until_success(
                     cmd=self.api.stop,

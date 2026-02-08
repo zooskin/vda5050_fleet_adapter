@@ -102,6 +102,67 @@ class TestRobotAdapterNavigate:
         assert call_args[0][0] == 'AGV-001'  # robot_name
         assert call_args[0][1] == 1  # cmd_id
 
+    def test_navigate_creates_new_order(self, adapter):
+        """첫 navigate 시 _active_order_id가 생성된다."""
+        dest = MagicMock()
+        dest.position = [5.0, 0.0, 0.0]
+        dest.map = 'map1'
+        dest.dock = None
+        execution = MagicMock()
+
+        assert adapter._active_order_id is None
+        adapter.navigate(dest, execution)
+        adapter.cancel_cmd_attempt()
+
+        assert adapter._active_order_id is not None
+        assert adapter._active_order_id.startswith('order_')
+        assert adapter._order_update_id == 0
+        assert adapter._final_destination is not None
+
+    def test_navigate_updates_existing_order(self, adapter):
+        """두 번째 navigate 시 같은 orderID, update_id 증가."""
+        dest1 = MagicMock()
+        dest1.position = [5.0, 0.0, 0.0]
+        dest1.map = 'map1'
+        dest1.dock = None
+        exec1 = MagicMock()
+
+        adapter.navigate(dest1, exec1)
+        adapter.cancel_cmd_attempt()
+
+        first_order_id = adapter._active_order_id
+        first_final_dest = adapter._final_destination
+
+        dest2 = MagicMock()
+        dest2.position = [0.0, 0.0, 0.0]
+        dest2.map = 'map1'
+        dest2.dock = None
+        exec2 = MagicMock()
+
+        adapter.navigate(dest2, exec2)
+        adapter.cancel_cmd_attempt()
+
+        assert adapter._active_order_id == first_order_id
+        assert adapter._order_update_id == 1
+        assert adapter._final_destination == first_final_dest
+
+    def test_navigate_passes_order_id_to_api(self, adapter, mock_api):
+        """navigate가 order_id와 order_update_id를 API에 전달한다."""
+        dest = MagicMock()
+        dest.position = [5.0, 0.0, 0.0]
+        dest.map = 'map1'
+        dest.dock = None
+        execution = MagicMock()
+
+        adapter.navigate(dest, execution)
+        adapter.cancel_cmd_attempt()
+
+        call_args = mock_api.navigate.call_args[0]
+        # args: (name, cmd_id, nodes, edges, map, order_id, update_id)
+        assert len(call_args) == 7
+        assert call_args[5].startswith('order_')  # order_id
+        assert call_args[6] == 0  # order_update_id
+
 
 class TestRobotAdapterStop:
     """stop() 테스트."""
@@ -130,6 +191,23 @@ class TestRobotAdapterStop:
         adapter.cancel_cmd_attempt()
 
         assert adapter.cmd_id == initial_cmd_id + 1
+
+    def test_stop_resets_order_state(self, adapter, mock_api):
+        """Stop 호출 시 order 상태가 초기화된다."""
+        execution = MagicMock()
+        activity = MagicMock()
+        execution.identifier.is_same.return_value = True
+        adapter.execution = execution
+        adapter._active_order_id = 'order_1_abc'
+        adapter._order_update_id = 2
+        adapter._final_destination = 'wp3'
+
+        adapter.stop(activity)
+        adapter.cancel_cmd_attempt()
+
+        assert adapter._active_order_id is None
+        assert adapter._order_update_id == 0
+        assert adapter._final_destination is None
 
     def test_stop_ignores_different_activity(self, adapter, mock_api):
         """다른 activity에 대한 stop은 무시된다."""
@@ -204,6 +282,31 @@ class TestRobotAdapterUpdate:
 
         execution.finished.assert_called_once()
         assert adapter.execution is None
+
+    def test_completion_resets_order_state(self, adapter, mock_api):
+        """명령 완료 시 order 상태가 초기화된다."""
+        execution = MagicMock()
+        adapter.execution = execution
+        adapter.cmd_id = 5
+        adapter.update_handle = MagicMock()
+        adapter._active_order_id = 'order_5_abc'
+        adapter._order_update_id = 1
+        adapter._final_destination = 'wp3'
+        mock_api.is_command_completed.return_value = True
+
+        state = MagicMock()
+        data = RobotUpdateData(
+            robot_name='AGV-001',
+            map_name='map1',
+            position=[1.0, 2.0, 0.0],
+            battery_soc=0.85,
+        )
+
+        adapter.update(state, data)
+
+        assert adapter._active_order_id is None
+        assert adapter._order_update_id == 0
+        assert adapter._final_destination is None
 
     def test_update_keeps_execution_if_not_completed(
         self, adapter, mock_api

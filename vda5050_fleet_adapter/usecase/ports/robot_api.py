@@ -52,6 +52,8 @@ class RobotAPI(ABC):
         nodes: list,
         edges: list,
         map_name: str,
+        order_id: str = '',
+        order_update_id: int = 0,
     ) -> RobotAPIResult:
         """VDA5050 Order를 전송하여 내비게이션을 시작한다.
 
@@ -61,6 +63,8 @@ class RobotAPI(ABC):
             nodes: VDA5050 Node 목록.
             edges: VDA5050 Edge 목록.
             map_name: 대상 맵 이름.
+            order_id: 외부 지정 Order ID (빈 문자열이면 자동 생성).
+            order_update_id: Order update 카운터.
 
         Returns:
             명령 결과.
