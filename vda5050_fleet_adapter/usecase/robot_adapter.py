@@ -19,6 +19,7 @@ from vda5050_fleet_adapter.infra.nav_graph.graph_utils import (
 )
 from vda5050_fleet_adapter.usecase.ports.robot_api import (
     RobotAPI,
+    RobotAPIResult,
     RobotUpdateData,
 )
 
@@ -174,16 +175,15 @@ class RobotAdapter:
             return
 
         # Negotiation 처리: pause 상태에서 navigate가 호출되면
-        # cancelOrder 전송 후 새 orderID로 명령
-        if self._is_paused_for_negotiation:
+        # cancelOrder 전송 → AGV 처리 대기 → 새 orderID로 명령
+        is_negotiation = self._is_paused_for_negotiation
+        if is_negotiation:
             self._is_paused_for_negotiation = False
             cancel_cmd_id = self.cmd_id
-            self.api.stop(self.name, cancel_cmd_id)
             self.cmd_id += 1
             logger.info(
                 'Negotiation detected for robot %s: '
-                'cancelOrder sent (cmd_id=%d), '
-                'creating new order with new orderID',
+                'will send cancelOrder (cmd_id=%d) then new order',
                 self.name, cancel_cmd_id,
             )
             current_task_id = self._get_current_task_id()
@@ -274,25 +274,54 @@ class RobotAdapter:
             base_end_index,
         )
 
-        self.attempt_cmd_until_success(
-            cmd=self.api.navigate,
-            args=(
-                self.name,
-                self.cmd_id,
-                vda_nodes,
-                vda_edges,
-                map_name,
-                self._active_order_id,
-                self._order_update_id,
-            ),
+        nav_args = (
+            self.name,
+            self.cmd_id,
+            vda_nodes,
+            vda_edges,
+            map_name,
+            self._active_order_id,
+            self._order_update_id,
         )
+
+        if is_negotiation:
+            # Negotiation: cancelOrder 전송 후 AGV가 처리할 시간을 주고
+            # 새 order를 전송한다. attempt_cmd_until_success의 1초 대기를
+            # 활용하여 cancelOrder와 새 order 사이에 간격을 둔다.
+            cancel_sent = [False]
+
+            def cancel_then_navigate(*args: Any) -> RobotAPIResult:
+                if not cancel_sent[0]:
+                    self.api.stop(self.name, cancel_cmd_id)
+                    cancel_sent[0] = True
+                    logger.info(
+                        'cancelOrder sent for robot %s (cmd_id=%d), '
+                        'waiting for AGV to process before new order',
+                        self.name, cancel_cmd_id,
+                    )
+                    return RobotAPIResult.RETRY
+                return self.api.navigate(*args)
+
+            self.attempt_cmd_until_success(
+                cmd=cancel_then_navigate,
+                args=nav_args,
+            )
+        else:
+            self.attempt_cmd_until_success(
+                cmd=self.api.navigate,
+                args=nav_args,
+            )
 
     def stop(self, activity: Any) -> None:
         """RMF 정지 콜백.
 
-        Negotiation 규칙에 따라 startPause를 전송한다.
+        Negotiation 규칙에 따라 startPause를 즉시 전송한다.
         Order 상태는 유지하여 이후 navigate()에서 cancelOrder +
         새 orderID로 처리할 수 있도록 한다.
+
+        startPause는 직접 호출한다 (attempt_cmd_until_success 사용 안 함).
+        navigate()가 즉시 뒤따라올 수 있어 retry 스레드가 취소될 수 있기
+        때문이다.
 
         Args:
             activity: 정지할 activity identifier.
@@ -301,16 +330,14 @@ class RobotAdapter:
             if self.execution.identifier.is_same(activity):
                 self.execution = None
                 self._is_paused_for_negotiation = True
+                self.cancel_cmd_attempt()
                 self.cmd_id += 1
                 logger.info(
                     'Stop (negotiation pause) for robot %s, '
                     'sending startPause, cmd_id=%d',
                     self.name, self.cmd_id,
                 )
-                self.attempt_cmd_until_success(
-                    cmd=self.api.pause,
-                    args=(self.name, self.cmd_id),
-                )
+                self.api.pause(self.name, self.cmd_id)
 
     def execute_action(
         self, category: str, description: dict, execution: Any
