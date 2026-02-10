@@ -172,6 +172,36 @@ class TestStop:
         assert result == RobotAPIResult.RETRY
 
 
+class TestPause:
+    """pause() 테스트."""
+
+    def test_pause_publishes_start_pause(self, api, mock_mqtt):
+        """pause가 startPause instant action을 발행한다."""
+        result = api.pause('AGV-001', 1)
+
+        assert result == RobotAPIResult.SUCCESS
+        mock_mqtt.publish.assert_called_once()
+        topic = mock_mqtt.publish.call_args[0][0]
+        assert topic == 'uagv/v2/TestCo/AGV-001/instantActions'
+        payload = mock_mqtt.publish.call_args[0][1]
+        data = json.loads(payload)
+        assert data['actions'][0]['actionType'] == 'startPause'
+
+    def test_pause_retries_when_disconnected(self, api, mock_mqtt):
+        """MQTT 미연결 시 RETRY를 반환한다."""
+        mock_mqtt.is_connected = False
+        result = api.pause('AGV-001', 1)
+        assert result == RobotAPIResult.RETRY
+
+    def test_pause_action_has_hard_blocking(self, api, mock_mqtt):
+        """Start-pause action이 HARD blocking type이다."""
+        api.pause('AGV-001', 1)
+
+        payload = mock_mqtt.publish.call_args[0][1]
+        data = json.loads(payload)
+        assert data['actions'][0]['blockingType'] == 'HARD'
+
+
 class TestStartActivity:
     """start_activity() 테스트."""
 

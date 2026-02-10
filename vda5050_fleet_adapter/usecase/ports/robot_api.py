@@ -83,6 +83,20 @@ class RobotAPI(ABC):
         """
 
     @abstractmethod
+    def pause(self, robot_name: str, cmd_id: int) -> RobotAPIResult:
+        """Start-pause instant action을 전송한다.
+
+        Negotiation 발생 시 로봇을 일시정지시키기 위해 사용한다.
+
+        Args:
+            robot_name: 로봇 이름.
+            cmd_id: 명령 ID.
+
+        Returns:
+            명령 결과.
+        """
+
+    @abstractmethod
     def start_activity(
         self,
         robot_name: str,

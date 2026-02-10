@@ -17,6 +17,7 @@ def mock_api():
     api = MagicMock()
     api.navigate.return_value = RobotAPIResult.SUCCESS
     api.stop.return_value = RobotAPIResult.SUCCESS
+    api.pause.return_value = RobotAPIResult.SUCCESS
     api.start_activity.return_value = RobotAPIResult.SUCCESS
     api.is_command_completed.return_value = False
     api.get_data.return_value = RobotUpdateData(
@@ -192,8 +193,33 @@ class TestRobotAdapterStop:
 
         assert adapter.cmd_id == initial_cmd_id + 1
 
-    def test_stop_resets_order_state(self, adapter, mock_api):
-        """Stop 호출 시 order 상태가 초기화된다."""
+    def test_stop_sends_pause_not_cancel(self, adapter, mock_api):
+        """Stop 호출 시 startPause를 전송한다 (cancelOrder 아님)."""
+        execution = MagicMock()
+        activity = MagicMock()
+        execution.identifier.is_same.return_value = True
+        adapter.execution = execution
+
+        adapter.stop(activity)
+        adapter.cancel_cmd_attempt()
+
+        mock_api.pause.assert_called_once()
+        mock_api.stop.assert_not_called()
+
+    def test_stop_sets_paused_for_negotiation(self, adapter, mock_api):
+        """Stop 호출 시 _is_paused_for_negotiation이 True가 된다."""
+        execution = MagicMock()
+        activity = MagicMock()
+        execution.identifier.is_same.return_value = True
+        adapter.execution = execution
+
+        adapter.stop(activity)
+        adapter.cancel_cmd_attempt()
+
+        assert adapter._is_paused_for_negotiation is True
+
+    def test_stop_preserves_order_state(self, adapter, mock_api):
+        """Stop 호출 시 order 상태가 유지된다 (negotiation 대비)."""
         execution = MagicMock()
         activity = MagicMock()
         execution.identifier.is_same.return_value = True
@@ -205,9 +231,9 @@ class TestRobotAdapterStop:
         adapter.stop(activity)
         adapter.cancel_cmd_attempt()
 
-        assert adapter._active_order_id is None
-        assert adapter._order_update_id == 0
-        assert adapter._final_destination is None
+        assert adapter._active_order_id == 'order_1_abc'
+        assert adapter._order_update_id == 2
+        assert adapter._final_destination == 'wp3'
 
     def test_stop_ignores_different_activity(self, adapter, mock_api):
         """다른 activity에 대한 stop은 무시된다."""
@@ -219,6 +245,7 @@ class TestRobotAdapterStop:
         adapter.stop(activity)
 
         assert adapter.execution is execution
+        mock_api.pause.assert_not_called()
         mock_api.stop.assert_not_called()
 
 
@@ -581,10 +608,10 @@ class TestOrderLifecycle:
         assert adapter_with_handle._active_order_id == order_id
         assert adapter_with_handle._order_update_id == 1
 
-    def test_stop_resets_order_state(
+    def test_stop_pauses_for_negotiation(
         self, adapter_with_handle,
     ):
-        """Stop 시 order 리셋."""
+        """Stop 시 pause 상태로 전환 (order 유지)."""
         execution = MagicMock()
         activity = MagicMock()
         execution.identifier.is_same.return_value = True
@@ -595,7 +622,8 @@ class TestOrderLifecycle:
         adapter_with_handle.stop(activity)
         adapter_with_handle.cancel_cmd_attempt()
 
-        assert adapter_with_handle._active_order_id is None
+        assert adapter_with_handle._is_paused_for_negotiation is True
+        assert adapter_with_handle._active_order_id == 'order_1_abc'
 
 
 class TestDestinationName:
@@ -717,6 +745,167 @@ class TestFinalNameReResolve:
 
         # _final_destination keeps previous value (fallback)
         assert adapter_with_handle._final_destination == first_dest
+
+
+class TestNegotiation:
+    """Negotiation 처리 테스트."""
+
+    def test_negotiation_sends_cancel_then_new_order(
+        self, adapter_with_handle, mock_api
+    ):
+        """Negotiation 시 cancelOrder 후 새 orderID로 navigate한다."""
+        adapter_with_handle.position = [0.0, 0.0, 0.0]
+
+        # 1. 첫 번째 navigate (정상)
+        dest1 = MagicMock()
+        dest1.name = 'wp2'
+        dest1.final_name = 'wp4'
+        dest1.position = [5.0, 0.0, 0.0]
+        dest1.map = 'map1'
+        exec1 = MagicMock()
+        adapter_with_handle.navigate(dest1, exec1)
+        adapter_with_handle.cancel_cmd_attempt()
+
+        first_order_id = adapter_with_handle._active_order_id
+        assert first_order_id is not None
+
+        # 2. stop() → startPause
+        activity = MagicMock()
+        exec1.identifier.is_same.return_value = True
+        adapter_with_handle.stop(activity)
+        adapter_with_handle.cancel_cmd_attempt()
+
+        assert adapter_with_handle._is_paused_for_negotiation is True
+        mock_api.pause.assert_called_once()
+
+        # 3. navigate() → cancelOrder + 새 order
+        dest2 = MagicMock()
+        dest2.name = 'wp3'
+        dest2.final_name = 'wp4'
+        dest2.position = [5.0, 5.0, 0.0]
+        dest2.map = 'map1'
+        exec2 = MagicMock()
+        adapter_with_handle.navigate(dest2, exec2)
+        adapter_with_handle.cancel_cmd_attempt()
+
+        # cancelOrder가 호출됨
+        mock_api.stop.assert_called_once()
+        # 새 orderID
+        assert adapter_with_handle._active_order_id != first_order_id
+        assert adapter_with_handle._order_update_id == 0
+        assert adapter_with_handle._is_paused_for_negotiation is False
+
+    def test_negotiation_creates_new_order_id(
+        self, adapter_with_handle, mock_api
+    ):
+        """Negotiation 후 orderID가 새로 생성된다."""
+        adapter_with_handle.position = [0.0, 0.0, 0.0]
+
+        dest1 = MagicMock()
+        dest1.position = [5.0, 0.0, 0.0]
+        dest1.map = 'map1'
+        exec1 = MagicMock()
+        adapter_with_handle.navigate(dest1, exec1)
+        adapter_with_handle.cancel_cmd_attempt()
+
+        old_id = adapter_with_handle._active_order_id
+
+        # stop → pause
+        activity = MagicMock()
+        exec1.identifier.is_same.return_value = True
+        adapter_with_handle.stop(activity)
+        adapter_with_handle.cancel_cmd_attempt()
+
+        # navigate → cancel + new order
+        dest2 = MagicMock()
+        dest2.position = [0.0, 5.0, 0.0]
+        dest2.map = 'map1'
+        exec2 = MagicMock()
+        adapter_with_handle.navigate(dest2, exec2)
+        adapter_with_handle.cancel_cmd_attempt()
+
+        new_id = adapter_with_handle._active_order_id
+        assert new_id is not None
+        assert new_id != old_id
+        assert new_id.startswith('order_')
+
+    def test_task_end_while_paused_sends_cancel(
+        self, adapter_with_handle, mock_api
+    ):
+        """Pause 상태에서 task 종료 시 cancelOrder를 전송한다."""
+        adapter_with_handle.position = [0.0, 0.0, 0.0]
+
+        dest = MagicMock()
+        dest.position = [5.0, 0.0, 0.0]
+        dest.map = 'map1'
+        exec1 = MagicMock()
+        adapter_with_handle.navigate(dest, exec1)
+        adapter_with_handle.cancel_cmd_attempt()
+
+        # stop → pause
+        activity = MagicMock()
+        exec1.identifier.is_same.return_value = True
+        adapter_with_handle.stop(activity)
+        adapter_with_handle.cancel_cmd_attempt()
+
+        assert adapter_with_handle._is_paused_for_negotiation is True
+
+        # task 종료 시뮬레이션: update에서 task_id가 빈 문자열
+        adapter_with_handle.update_handle.more.return_value \
+            .current_task_id.return_value = ''
+        state = MagicMock()
+        data = RobotUpdateData(
+            robot_name='AGV-001', map_name='map1',
+            position=[5.0, 0.0, 0.0], battery_soc=0.85,
+        )
+        adapter_with_handle.update(state, data)
+        adapter_with_handle.cancel_cmd_attempt()
+
+        # cancelOrder가 _reset_order_state에서 호출됨
+        mock_api.stop.assert_called_once()
+        assert adapter_with_handle._is_paused_for_negotiation is False
+        assert adapter_with_handle._active_order_id is None
+
+    def test_negotiation_flow_sequence(
+        self, adapter_with_handle, mock_api
+    ):
+        """전체 negotiation 시퀀스: pause → cancel → new order."""
+        adapter_with_handle.position = [0.0, 0.0, 0.0]
+
+        # 1. 정상 navigate
+        dest1 = MagicMock()
+        dest1.name = 'wp2'
+        dest1.final_name = 'wp4'
+        dest1.position = [5.0, 0.0, 0.0]
+        dest1.map = 'map1'
+        exec1 = MagicMock()
+        adapter_with_handle.navigate(dest1, exec1)
+        adapter_with_handle.cancel_cmd_attempt()
+
+        # 2. negotiation 발생 → stop
+        activity = MagicMock()
+        exec1.identifier.is_same.return_value = True
+        adapter_with_handle.stop(activity)
+        adapter_with_handle.cancel_cmd_attempt()
+
+        # pause 호출 확인
+        assert mock_api.pause.call_count == 1
+        assert mock_api.stop.call_count == 0
+
+        # 3. 새 경로로 navigate
+        dest2 = MagicMock()
+        dest2.name = 'wp3'
+        dest2.final_name = 'wp4'
+        dest2.position = [5.0, 5.0, 0.0]
+        dest2.map = 'map1'
+        exec2 = MagicMock()
+        adapter_with_handle.navigate(dest2, exec2)
+        adapter_with_handle.cancel_cmd_attempt()
+
+        # cancel 호출 확인
+        assert mock_api.stop.call_count == 1
+        # 새 navigate 호출 확인 (총 2회: 첫 번째 + negotiation 후)
+        assert mock_api.navigate.call_count == 2
 
 
 class TestStartNodeFix:

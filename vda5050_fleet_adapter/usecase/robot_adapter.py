@@ -75,6 +75,9 @@ class RobotAdapter:
         self._issue_cmd_thread: threading.Thread | None = None
         self._cancel_cmd_event = threading.Event()
 
+        # Negotiation 상태 관리
+        self._is_paused_for_negotiation: bool = False
+
         # 경로 캐시
         self._last_nodes: list[list] = []
 
@@ -170,17 +173,20 @@ class RobotAdapter:
             )
             return
 
-        # Task 경계 감지: current_task_id 변경 시 새 Task
-        current_task_id = self._get_current_task_id()
-        is_new_task = (
-            self._active_order_id is None
-            or (
-                current_task_id
-                and current_task_id != self._current_task_id
+        # Negotiation 처리: pause 상태에서 navigate가 호출되면
+        # cancelOrder 전송 후 새 orderID로 명령
+        if self._is_paused_for_negotiation:
+            self._is_paused_for_negotiation = False
+            cancel_cmd_id = self.cmd_id
+            self.api.stop(self.name, cancel_cmd_id)
+            self.cmd_id += 1
+            logger.info(
+                'Negotiation detected for robot %s: '
+                'cancelOrder sent (cmd_id=%d), '
+                'creating new order with new orderID',
+                self.name, cancel_cmd_id,
             )
-        )
-
-        if is_new_task:
+            current_task_id = self._get_current_task_id()
             self._current_task_id = current_task_id
             self._final_destination = (
                 self._resolve_final_destination(destination, goal_node)
@@ -191,14 +197,37 @@ class RobotAdapter:
             self._order_update_id = 0
             self._last_nodes = []
         else:
-            # Order Update: 같은 orderID, update_id 증가
-            self._order_update_id += 1
-            self._final_destination = (
-                self._resolve_final_destination(
-                    destination,
-                    self._final_destination or goal_node,
+            # Task 경계 감지: current_task_id 변경 시 새 Task
+            current_task_id = self._get_current_task_id()
+            is_new_task = (
+                self._active_order_id is None
+                or (
+                    current_task_id
+                    and current_task_id != self._current_task_id
                 )
             )
+
+            if is_new_task:
+                self._current_task_id = current_task_id
+                self._final_destination = (
+                    self._resolve_final_destination(
+                        destination, goal_node
+                    )
+                )
+                self._active_order_id = (
+                    f'order_{self.cmd_id}_{uuid.uuid4().hex[:8]}'
+                )
+                self._order_update_id = 0
+                self._last_nodes = []
+            else:
+                # Order Update: 같은 orderID, update_id 증가
+                self._order_update_id += 1
+                self._final_destination = (
+                    self._resolve_final_destination(
+                        destination,
+                        self._final_destination or goal_node,
+                    )
+                )
 
         # 현재 위치 기반으로 start_node 결정
         start_node = None
@@ -261,7 +290,9 @@ class RobotAdapter:
     def stop(self, activity: Any) -> None:
         """RMF 정지 콜백.
 
-        Order 상태를 초기화하고 cancelOrder를 전송한다.
+        Negotiation 규칙에 따라 startPause를 전송한다.
+        Order 상태는 유지하여 이후 navigate()에서 cancelOrder +
+        새 orderID로 처리할 수 있도록 한다.
 
         Args:
             activity: 정지할 activity identifier.
@@ -269,10 +300,15 @@ class RobotAdapter:
         if self.execution is not None:
             if self.execution.identifier.is_same(activity):
                 self.execution = None
-                self._reset_order_state()
+                self._is_paused_for_negotiation = True
                 self.cmd_id += 1
+                logger.info(
+                    'Stop (negotiation pause) for robot %s, '
+                    'sending startPause, cmd_id=%d',
+                    self.name, self.cmd_id,
+                )
                 self.attempt_cmd_until_success(
-                    cmd=self.api.stop,
+                    cmd=self.api.pause,
                     args=(self.name, self.cmd_id),
                 )
 
@@ -387,7 +423,24 @@ class RobotAdapter:
         return fallback
 
     def _reset_order_state(self) -> None:
-        """Order 라이프사이클 상태를 초기화한다."""
+        """Order 라이프사이클 상태를 초기화한다.
+
+        Pause 상태에서 navigate 없이 task가 종료된 경우
+        cancelOrder를 전송하여 로봇의 order를 정리한다.
+        """
+        if self._is_paused_for_negotiation:
+            self._is_paused_for_negotiation = False
+            self.cmd_id += 1
+            logger.info(
+                'Task ended while paused, sending cancelOrder '
+                'for robot %s, cmd_id=%d',
+                self.name, self.cmd_id,
+            )
+            self.attempt_cmd_until_success(
+                cmd=self.api.stop,
+                args=(self.name, self.cmd_id),
+            )
+
         old_task_id = self._current_task_id
         self._active_order_id = None
         self._order_update_id = 0
