@@ -21,7 +21,6 @@ from vda5050_fleet_adapter.usecase.ports.robot_api import (
     RobotAPI,
     RobotUpdateData,
 )
-from vda5050_fleet_adapter.usecase.ports.task_tracker import TaskTracker
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +39,6 @@ class RobotAdapter:
         nav_nodes: nav graph 노드 dict.
         nav_edges: nav graph 엣지 dict.
         nav_graph: networkx 그래프.
-        task_tracker: Task 최종 목적지 추적기 (optional).
     """
 
     def __init__(
@@ -52,7 +50,6 @@ class RobotAdapter:
         nav_nodes: dict,
         nav_edges: dict,
         nav_graph: Any,
-        task_tracker: TaskTracker | None = None,
     ) -> None:
         self.name = name
         self.api = api
@@ -61,7 +58,6 @@ class RobotAdapter:
         self.nav_nodes = nav_nodes
         self.nav_edges = nav_edges
         self.nav_graph = nav_graph
-        self.task_tracker = task_tracker
 
         self.execution: Any | None = None
         self.update_handle: Any | None = None
@@ -187,7 +183,7 @@ class RobotAdapter:
         if is_new_task:
             self._current_task_id = current_task_id
             self._final_destination = (
-                self._resolve_final_destination(goal_node)
+                self._resolve_final_destination(destination, goal_node)
             )
             self._active_order_id = (
                 f'order_{self.cmd_id}_{uuid.uuid4().hex[:8]}'
@@ -197,11 +193,10 @@ class RobotAdapter:
         else:
             # Order Update: 같은 orderID, update_id 증가
             self._order_update_id += 1
-            # Re-resolve: tracker may have received fleet_state
-            # data since the initial resolve
             self._final_destination = (
                 self._resolve_final_destination(
-                    self._final_destination or goal_node
+                    destination,
+                    self._final_destination or goal_node,
                 )
             )
 
@@ -359,54 +354,41 @@ class RobotAdapter:
             )
             return None
 
-    def _resolve_final_destination(self, fallback: str) -> str:
-        """Task_tracker에서 최종 목적지를 조회한다.
+    def _resolve_final_destination(
+        self, destination: Any, fallback: str,
+    ) -> str:
+        """Navigate callback의 destination에서 최종 목적지를 조회한다.
 
-        Task_tracker가 없거나 매핑이 없으면 fallback을 사용한다.
+        C++ EasyFullControl 패치로 추가된 destination.final_name을
+        사용한다. 없으면 fallback(goal_node)을 사용한다.
 
         Args:
+            destination: RMF Destination 객체.
             fallback: 조회 실패 시 사용할 목적지 (goal_node).
 
         Returns:
             최종 목적지 waypoint 이름.
         """
-        if self.task_tracker is None:
-            return fallback
-
-        task_id = self._get_current_task_id()
-        if task_id is None:
-            return fallback
-
-        destination = self.task_tracker.get_final_destination(task_id)
-        if destination is not None and destination in self.nav_nodes:
+        final_name = getattr(destination, 'final_name', '')
+        if final_name and final_name in self.nav_nodes:
             logger.info(
-                'Final destination from task_tracker: '
-                'robot=%s, task_id=%s, destination=%s',
-                self.name, task_id, destination,
+                'Final destination from Destination.final_name: '
+                'robot=%s, final_name=%s',
+                self.name, final_name,
             )
-            return destination
+            return final_name
 
-        if destination is not None and destination not in self.nav_nodes:
+        if final_name and final_name not in self.nav_nodes:
             logger.warning(
-                'Destination from task_tracker not in nav_nodes: '
-                'robot=%s, task_id=%s, destination=%s, '
-                'using fallback=%s',
-                self.name, task_id, destination, fallback,
-            )
-        else:
-            logger.warning(
-                'No final destination from task_tracker: '
-                'robot=%s, task_id=%s, destination=%s, '
-                'using fallback=%s',
-                self.name, task_id, destination, fallback,
+                'Destination.final_name not in nav_nodes: '
+                'robot=%s, final_name=%s, using fallback=%s',
+                self.name, final_name, fallback,
             )
         return fallback
 
     def _reset_order_state(self) -> None:
         """Order 라이프사이클 상태를 초기화한다."""
         old_task_id = self._current_task_id
-        if self.task_tracker is not None and old_task_id:
-            self.task_tracker.clear_booking(old_task_id)
         self._active_order_id = None
         self._order_update_id = 0
         self._final_destination = None

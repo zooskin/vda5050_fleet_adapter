@@ -446,20 +446,11 @@ class TestRobotAdapterRetry:
 
 
 @pytest.fixture
-def mock_task_tracker():
-    """Mock TaskTracker."""
-    tracker = MagicMock()
-    tracker.get_final_destination.return_value = None
-    tracker.clear_booking = MagicMock()
-    return tracker
-
-
-@pytest.fixture
-def adapter_with_tracker(
-    mock_api, mock_node, mock_task_tracker,
+def adapter_with_handle(
+    mock_api, mock_node,
     sample_nav_nodes, sample_nav_edges,
 ):
-    """Create RobotAdapter with task_tracker."""
+    """Create RobotAdapter with update_handle."""
     from vda5050_fleet_adapter.infra.nav_graph.graph_utils import (
         create_graph,
     )
@@ -472,7 +463,6 @@ def adapter_with_tracker(
         nav_nodes=sample_nav_nodes,
         nav_edges=sample_nav_edges,
         nav_graph=graph,
-        task_tracker=mock_task_tracker,
     )
     robot.configuration = MagicMock()
     mock_update_handle = MagicMock()
@@ -482,73 +472,76 @@ def adapter_with_tracker(
     return robot
 
 
-class TestTaskTrackerIntegration:
-    """task_tracker를 사용한 navigate 테스트."""
+class TestFinalNameIntegration:
+    """destination.final_name을 사용한 navigate 테스트."""
 
-    def test_uses_tracker_destination(
-        self, adapter_with_tracker, mock_task_tracker
+    def test_uses_final_name_destination(
+        self, adapter_with_handle, mock_api,
     ):
-        """Task_tracker가 있을 때 최종 목적지를 사용한다."""
-        mock_task_tracker.get_final_destination.return_value = 'wp4'
-
+        """destination.final_name이 있을 때 최종 목적지를 사용한다."""
         dest = MagicMock()
         dest.position = [5.0, 0.0, 0.0]
         dest.map = 'map1'
+        dest.name = 'wp2'
+        dest.final_name = 'wp4'
         execution = MagicMock()
 
-        adapter_with_tracker.position = [0.0, 0.0, 0.0]
-        adapter_with_tracker.navigate(dest, execution)
-        adapter_with_tracker.cancel_cmd_attempt()
+        adapter_with_handle.position = [0.0, 0.0, 0.0]
+        adapter_with_handle.navigate(dest, execution)
+        adapter_with_handle.cancel_cmd_attempt()
 
-        assert adapter_with_tracker._final_destination == 'wp4'
+        assert adapter_with_handle._final_destination == 'wp4'
 
-    def test_falls_back_without_tracker_result(
-        self, adapter_with_tracker, mock_task_tracker
+    def test_falls_back_without_final_name(
+        self, adapter_with_handle, mock_api,
     ):
-        """Task_tracker가 None 반환 시 goal_node를 사용한다."""
-        mock_task_tracker.get_final_destination.return_value = None
-
-        dest = MagicMock()
+        """destination.final_name이 없으면 goal_node를 사용한다."""
+        dest = MagicMock(spec=[])
         dest.position = [5.0, 0.0, 0.0]
         dest.map = 'map1'
         execution = MagicMock()
 
-        adapter_with_tracker.position = [0.0, 0.0, 0.0]
-        adapter_with_tracker.navigate(dest, execution)
-        adapter_with_tracker.cancel_cmd_attempt()
+        adapter_with_handle.position = [0.0, 0.0, 0.0]
+        adapter_with_handle.navigate(dest, execution)
+        adapter_with_handle.cancel_cmd_attempt()
 
-        assert adapter_with_tracker._final_destination == 'wp2'
+        assert adapter_with_handle._final_destination == 'wp2'
 
-    def test_backward_compat_without_tracker(self, adapter):
-        """Task_tracker 없이도 동작한다."""
+    def test_falls_back_when_final_name_empty(
+        self, adapter_with_handle, mock_api,
+    ):
+        """destination.final_name이 빈 문자열이면 fallback한다."""
         dest = MagicMock()
         dest.position = [5.0, 0.0, 0.0]
         dest.map = 'map1'
+        dest.name = 'wp2'
+        dest.final_name = ''
         execution = MagicMock()
 
-        adapter.navigate(dest, execution)
-        adapter.cancel_cmd_attempt()
+        adapter_with_handle.position = [0.0, 0.0, 0.0]
+        adapter_with_handle.navigate(dest, execution)
+        adapter_with_handle.cancel_cmd_attempt()
 
-        assert adapter._final_destination is not None
+        assert adapter_with_handle._final_destination == 'wp2'
 
 
 class TestOrderLifecycle:
     """Order 라이프사이클 관리 테스트."""
 
     def test_order_preserved_across_navigates(
-        self, adapter_with_tracker, mock_api
+        self, adapter_with_handle, mock_api
     ):
         """같은 task 내에서 order가 유지된다."""
-        adapter_with_tracker.position = [0.0, 0.0, 0.0]
+        adapter_with_handle.position = [0.0, 0.0, 0.0]
 
         dest1 = MagicMock()
         dest1.position = [5.0, 0.0, 0.0]
         dest1.map = 'map1'
         exec1 = MagicMock()
-        adapter_with_tracker.navigate(dest1, exec1)
-        adapter_with_tracker.cancel_cmd_attempt()
+        adapter_with_handle.navigate(dest1, exec1)
+        adapter_with_handle.cancel_cmd_attempt()
 
-        order_id = adapter_with_tracker._active_order_id
+        order_id = adapter_with_handle._active_order_id
 
         # Command 완료 시뮬레이션
         mock_api.is_command_completed.return_value = True
@@ -557,65 +550,62 @@ class TestOrderLifecycle:
             robot_name='AGV-001', map_name='map1',
             position=[5.0, 0.0, 0.0], battery_soc=0.85,
         )
-        adapter_with_tracker.update(state, data)
+        adapter_with_handle.update(state, data)
 
         # Order state 유지 (task 아직 active)
-        assert adapter_with_tracker._active_order_id == order_id
+        assert adapter_with_handle._active_order_id == order_id
 
     def test_order_update_id_increments(
-        self, adapter_with_tracker, mock_api
+        self, adapter_with_handle, mock_api
     ):
         """같은 task 내 두 번째 navigate에서 update_id 증가."""
-        adapter_with_tracker.position = [0.0, 0.0, 0.0]
+        adapter_with_handle.position = [0.0, 0.0, 0.0]
 
         dest1 = MagicMock()
         dest1.position = [5.0, 0.0, 0.0]
         dest1.map = 'map1'
         exec1 = MagicMock()
-        adapter_with_tracker.navigate(dest1, exec1)
-        adapter_with_tracker.cancel_cmd_attempt()
+        adapter_with_handle.navigate(dest1, exec1)
+        adapter_with_handle.cancel_cmd_attempt()
 
-        order_id = adapter_with_tracker._active_order_id
-        assert adapter_with_tracker._order_update_id == 0
+        order_id = adapter_with_handle._active_order_id
+        assert adapter_with_handle._order_update_id == 0
 
         dest2 = MagicMock()
         dest2.position = [5.0, 5.0, 0.0]
         dest2.map = 'map1'
         exec2 = MagicMock()
-        adapter_with_tracker.navigate(dest2, exec2)
-        adapter_with_tracker.cancel_cmd_attempt()
+        adapter_with_handle.navigate(dest2, exec2)
+        adapter_with_handle.cancel_cmd_attempt()
 
-        assert adapter_with_tracker._active_order_id == order_id
-        assert adapter_with_tracker._order_update_id == 1
+        assert adapter_with_handle._active_order_id == order_id
+        assert adapter_with_handle._order_update_id == 1
 
-    def test_stop_resets_order_and_clears_booking(
-        self, adapter_with_tracker, mock_task_tracker
+    def test_stop_resets_order_state(
+        self, adapter_with_handle,
     ):
-        """Stop 시 order 리셋 및 booking 캐시 정리."""
+        """Stop 시 order 리셋."""
         execution = MagicMock()
         activity = MagicMock()
         execution.identifier.is_same.return_value = True
-        adapter_with_tracker.execution = execution
-        adapter_with_tracker._active_order_id = 'order_1_abc'
-        adapter_with_tracker._current_task_id = 'compose.dispatch-001'
+        adapter_with_handle.execution = execution
+        adapter_with_handle._active_order_id = 'order_1_abc'
+        adapter_with_handle._current_task_id = 'compose.dispatch-001'
 
-        adapter_with_tracker.stop(activity)
-        adapter_with_tracker.cancel_cmd_attempt()
+        adapter_with_handle.stop(activity)
+        adapter_with_handle.cancel_cmd_attempt()
 
-        assert adapter_with_tracker._active_order_id is None
-        mock_task_tracker.clear_booking.assert_called_once_with(
-            'compose.dispatch-001'
-        )
+        assert adapter_with_handle._active_order_id is None
 
 
 class TestDestinationName:
     """destination.name 사용 테스트."""
 
     def test_uses_destination_name_when_available(
-        self, adapter_with_tracker, mock_api
+        self, adapter_with_handle, mock_api
     ):
         """destination.name이 nav_nodes에 있으면 사용한다."""
-        adapter_with_tracker.position = [0.0, 0.0, 0.0]
+        adapter_with_handle.position = [0.0, 0.0, 0.0]
 
         dest = MagicMock()
         dest.name = 'wp3'
@@ -623,33 +613,33 @@ class TestDestinationName:
         dest.map = 'map1'
         execution = MagicMock()
 
-        adapter_with_tracker.navigate(dest, execution)
-        adapter_with_tracker.cancel_cmd_attempt()
+        adapter_with_handle.navigate(dest, execution)
+        adapter_with_handle.cancel_cmd_attempt()
 
         # goal_node should be wp3 (from name, not find_nearest_node)
-        assert adapter_with_tracker._final_destination is not None
+        assert adapter_with_handle._final_destination is not None
 
     def test_falls_back_to_nearest_node(
-        self, adapter_with_tracker, mock_api
+        self, adapter_with_handle, mock_api
     ):
         """destination.name이 없으면 find_nearest_node를 사용한다."""
-        adapter_with_tracker.position = [0.0, 0.0, 0.0]
+        adapter_with_handle.position = [0.0, 0.0, 0.0]
 
         dest = MagicMock(spec=[])  # no 'name' attribute
         dest.position = [5.0, 0.0, 0.0]
         dest.map = 'map1'
         execution = MagicMock()
 
-        adapter_with_tracker.navigate(dest, execution)
-        adapter_with_tracker.cancel_cmd_attempt()
+        adapter_with_handle.navigate(dest, execution)
+        adapter_with_handle.cancel_cmd_attempt()
 
-        assert adapter_with_tracker._final_destination is not None
+        assert adapter_with_handle._final_destination is not None
 
     def test_falls_back_when_name_not_in_nav_nodes(
-        self, adapter_with_tracker, mock_api
+        self, adapter_with_handle, mock_api
     ):
         """destination.name이 nav_nodes에 없으면 fallback한다."""
-        adapter_with_tracker.position = [0.0, 0.0, 0.0]
+        adapter_with_handle.position = [0.0, 0.0, 0.0]
 
         dest = MagicMock()
         dest.name = 'unknown_waypoint'
@@ -657,96 +647,94 @@ class TestDestinationName:
         dest.map = 'map1'
         execution = MagicMock()
 
-        adapter_with_tracker.navigate(dest, execution)
-        adapter_with_tracker.cancel_cmd_attempt()
+        adapter_with_handle.navigate(dest, execution)
+        adapter_with_handle.cancel_cmd_attempt()
 
         # Should use find_nearest_node fallback (wp2)
-        assert adapter_with_tracker._final_destination is not None
+        assert adapter_with_handle._final_destination is not None
 
 
-class TestReResolveDestination:
+class TestFinalNameReResolve:
     """Order update 시 final_destination 재조회 테스트."""
 
-    def test_re_resolves_on_order_update(
-        self, adapter_with_tracker, mock_task_tracker, mock_api
+    def test_uses_final_name_on_update(
+        self, adapter_with_handle, mock_api
     ):
-        """두 번째 navigate에서 tracker 데이터로 재조회한다."""
-        adapter_with_tracker.position = [0.0, 0.0, 0.0]
+        """두 번째 navigate에서 final_name으로 재조회한다."""
+        adapter_with_handle.position = [0.0, 0.0, 0.0]
 
-        # First navigate: tracker has no data
-        mock_task_tracker.get_final_destination.return_value = None
-
+        # First navigate: no final_name
         dest1 = MagicMock()
         dest1.name = 'wp2'
+        dest1.final_name = ''
         dest1.position = [5.0, 0.0, 0.0]
         dest1.map = 'map1'
         exec1 = MagicMock()
-        adapter_with_tracker.navigate(dest1, exec1)
-        adapter_with_tracker.cancel_cmd_attempt()
+        adapter_with_handle.navigate(dest1, exec1)
+        adapter_with_handle.cancel_cmd_attempt()
 
         # fallback used
-        assert adapter_with_tracker._final_destination == 'wp2'
+        assert adapter_with_handle._final_destination == 'wp2'
 
-        # Now tracker has data (fleet_state arrived)
-        mock_task_tracker.get_final_destination.return_value = 'wp4'
-
+        # Second navigate: final_name available
         dest2 = MagicMock()
         dest2.name = 'wp3'
+        dest2.final_name = 'wp4'
         dest2.position = [5.0, 5.0, 0.0]
         dest2.map = 'map1'
         exec2 = MagicMock()
-        adapter_with_tracker.navigate(dest2, exec2)
-        adapter_with_tracker.cancel_cmd_attempt()
+        adapter_with_handle.navigate(dest2, exec2)
+        adapter_with_handle.cancel_cmd_attempt()
 
-        # Re-resolved to tracker destination
-        assert adapter_with_tracker._final_destination == 'wp4'
+        assert adapter_with_handle._final_destination == 'wp4'
 
-    def test_keeps_destination_when_tracker_still_empty(
-        self, adapter_with_tracker, mock_task_tracker, mock_api
+    def test_keeps_destination_when_no_final_name(
+        self, adapter_with_handle, mock_api
     ):
-        """Tracker에 데이터가 없으면 기존 final_dest를 유지한다."""
-        adapter_with_tracker.position = [0.0, 0.0, 0.0]
-        mock_task_tracker.get_final_destination.return_value = None
+        """final_name이 없으면 기존 final_dest를 유지한다."""
+        adapter_with_handle.position = [0.0, 0.0, 0.0]
 
         dest1 = MagicMock()
         dest1.name = 'wp2'
+        dest1.final_name = ''
         dest1.position = [5.0, 0.0, 0.0]
         dest1.map = 'map1'
         exec1 = MagicMock()
-        adapter_with_tracker.navigate(dest1, exec1)
-        adapter_with_tracker.cancel_cmd_attempt()
+        adapter_with_handle.navigate(dest1, exec1)
+        adapter_with_handle.cancel_cmd_attempt()
 
-        first_dest = adapter_with_tracker._final_destination
+        first_dest = adapter_with_handle._final_destination
 
-        # Second navigate, tracker still empty
+        # Second navigate, still no final_name
         dest2 = MagicMock()
         dest2.name = 'wp3'
+        dest2.final_name = ''
         dest2.position = [5.0, 5.0, 0.0]
         dest2.map = 'map1'
         exec2 = MagicMock()
-        adapter_with_tracker.navigate(dest2, exec2)
-        adapter_with_tracker.cancel_cmd_attempt()
+        adapter_with_handle.navigate(dest2, exec2)
+        adapter_with_handle.cancel_cmd_attempt()
 
-        # _final_destination should remain (fallback = previous value)
-        assert adapter_with_tracker._final_destination == first_dest
+        # _final_destination keeps previous value (fallback)
+        assert adapter_with_handle._final_destination == first_dest
 
 
 class TestStartNodeFix:
     """Start_node 결정 로직 테스트."""
 
     def test_uses_current_position(
-        self, adapter_with_tracker, mock_api
+        self, adapter_with_handle, mock_api
     ):
         """Navigate에서 현재 위치를 start_node로 사용한다."""
-        adapter_with_tracker.position = [0.0, 0.0, 0.0]
+        adapter_with_handle.position = [0.0, 0.0, 0.0]
 
         dest = MagicMock()
         dest.name = 'wp2'
         dest.position = [5.0, 0.0, 0.0]
         dest.map = 'map1'
         execution = MagicMock()
-        adapter_with_tracker.navigate(dest, execution)
-        adapter_with_tracker.cancel_cmd_attempt()
+        adapter_with_handle.navigate(dest, execution)
+        adapter_with_handle.cancel_cmd_attempt()
 
         call_args = mock_api.navigate.call_args[0]
         nodes = call_args[2]
