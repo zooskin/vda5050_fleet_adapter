@@ -913,6 +913,140 @@ class TestNegotiation:
         assert mock_api.navigate.call_count == 2
 
 
+class TestDetourPath:
+    """경유지(goal_node)를 경유하는 경로 생성 테스트.
+
+    RMF가 교통 관리를 위해 경유지를 지정한 경우,
+    최단 경로가 아닌 경유지를 반드시 거치는 경로를 생성해야 한다.
+    """
+
+    @pytest.fixture
+    def detour_adapter(self, mock_api, mock_node):
+        """T자 그래프로 경유지 테스트용 어댑터 생성.
+
+        Graph:
+            A(0,0) --- B(5,0) --- C(10,0)
+                         |
+                       D(5,5)
+        shortest A→C: A→B→C (D를 거치지 않음)
+        """
+        from vda5050_fleet_adapter.infra.nav_graph.graph_utils import (
+            create_graph,
+        )
+        nodes = {
+            'A': {'x': 0.0, 'y': 0.0, 'attributes': {}},
+            'B': {'x': 5.0, 'y': 0.0, 'attributes': {}},
+            'C': {'x': 10.0, 'y': 0.0, 'attributes': {}},
+            'D': {'x': 5.0, 'y': 5.0, 'attributes': {}},
+        }
+        edges = {
+            'e0': {'start': 'A', 'end': 'B', 'attributes': {}},
+            'e1': {'start': 'B', 'end': 'A', 'attributes': {}},
+            'e2': {'start': 'B', 'end': 'C', 'attributes': {}},
+            'e3': {'start': 'C', 'end': 'B', 'attributes': {}},
+            'e4': {'start': 'B', 'end': 'D', 'attributes': {}},
+            'e5': {'start': 'D', 'end': 'B', 'attributes': {}},
+        }
+        graph = create_graph(nodes, edges)
+        robot = RobotAdapter(
+            name='AGV-001', api=mock_api, node=mock_node,
+            fleet_handle=MagicMock(),
+            nav_nodes=nodes, nav_edges=edges, nav_graph=graph,
+        )
+        robot.configuration = MagicMock()
+        mock_handle = MagicMock()
+        mock_handle.more.return_value.current_task_id \
+            .return_value = 'task-001'
+        robot.update_handle = mock_handle
+        return robot
+
+    def test_path_goes_through_goal_node(
+        self, detour_adapter, mock_api
+    ):
+        """경유지 D를 반드시 거치는 경로 생성 (A→B→D→B→C)."""
+        detour_adapter.position = [0.0, 0.0, 0.0]
+
+        dest = MagicMock()
+        dest.name = 'D'
+        dest.final_name = 'C'
+        dest.position = [5.0, 5.0, 0.0]
+        dest.map = 'L1'
+        execution = MagicMock()
+
+        detour_adapter.navigate(dest, execution)
+        detour_adapter.cancel_cmd_attempt()
+
+        call_args = mock_api.navigate.call_args[0]
+        nodes = call_args[2]
+        node_ids = [n.node_id for n in nodes]
+
+        # D를 반드시 거쳐야 함
+        assert 'D' in node_ids
+        # D가 C보다 먼저 나와야 함
+        assert node_ids.index('D') < node_ids.index('C')
+        # 경로: A → B → D → B → C
+        assert node_ids == ['A', 'B', 'D', 'B', 'C']
+
+    def test_base_horizon_split_with_detour(
+        self, detour_adapter, mock_api
+    ):
+        """경유지까지 Base, 이후 Horizon으로 분리."""
+        detour_adapter.position = [0.0, 0.0, 0.0]
+
+        dest = MagicMock()
+        dest.name = 'D'
+        dest.final_name = 'C'
+        dest.position = [5.0, 5.0, 0.0]
+        dest.map = 'L1'
+        execution = MagicMock()
+
+        detour_adapter.navigate(dest, execution)
+        detour_adapter.cancel_cmd_attempt()
+
+        call_args = mock_api.navigate.call_args[0]
+        nodes = call_args[2]
+
+        # D(index=2)까지 Base, 이후 Horizon
+        for i, node in enumerate(nodes):
+            node_id = node.node_id
+            if node_id == 'D':
+                d_index = i
+                break
+        for i, node in enumerate(nodes):
+            if i <= d_index:
+                assert node.released is True, (
+                    f'{node.node_id} should be base (released)'
+                )
+            else:
+                assert node.released is False, (
+                    f'{node.node_id} should be horizon (not released)'
+                )
+
+    def test_direct_path_when_goal_is_final(
+        self, detour_adapter, mock_api
+    ):
+        """경유지 == 최종목적지면 최단 경로 사용."""
+        detour_adapter.position = [0.0, 0.0, 0.0]
+
+        dest = MagicMock()
+        dest.name = 'C'
+        dest.final_name = 'C'
+        dest.position = [10.0, 0.0, 0.0]
+        dest.map = 'L1'
+        execution = MagicMock()
+
+        detour_adapter.navigate(dest, execution)
+        detour_adapter.cancel_cmd_attempt()
+
+        call_args = mock_api.navigate.call_args[0]
+        nodes = call_args[2]
+        node_ids = [n.node_id for n in nodes]
+
+        # 최단 경로: A → B → C (D를 거치지 않음)
+        assert node_ids == ['A', 'B', 'C']
+        assert 'D' not in node_ids
+
+
 class TestStartNodeFix:
     """Start_node 결정 로직 테스트."""
 

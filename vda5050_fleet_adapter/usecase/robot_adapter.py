@@ -239,9 +239,29 @@ class RobotAdapter:
         if start_node is None:
             start_node = goal_node
 
-        # 경로 계산: current → final_destination
+        # 경로 계산: current → goal_node → final_destination
+        # RMF가 goal_node를 경유지로 지정한 경우 (negotiation, 교통 관리 등)
+        # 반드시 goal_node를 거쳐야 한다. 최단 경로로 바로 가면 안 된다.
         target = self._final_destination or goal_node
-        path = compute_path(self.nav_graph, start_node, target)
+        if goal_node != target and goal_node != start_node:
+            path_to_goal = compute_path(
+                self.nav_graph, start_node, goal_node
+            )
+            path_from_goal = compute_path(
+                self.nav_graph, goal_node, target
+            )
+            if path_to_goal and path_from_goal:
+                # goal_node 중복 제거하여 연결
+                path = path_to_goal + path_from_goal[1:]
+            elif path_to_goal:
+                path = path_to_goal
+            else:
+                path = compute_path(
+                    self.nav_graph, start_node, target
+                )
+        else:
+            path = compute_path(self.nav_graph, start_node, target)
+
         if path is None:
             path = [start_node, target]
 
