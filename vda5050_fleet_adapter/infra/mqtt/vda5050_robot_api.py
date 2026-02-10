@@ -182,6 +182,36 @@ class Vda5050RobotAPI(RobotAPI):
         logger.info('Stop (cancelOrder) sent: robot=%s', robot_name)
         return RobotAPIResult.SUCCESS
 
+    def pause(self, robot_name: str, cmd_id: int) -> RobotAPIResult:
+        """Start-pause instant action을 전송한다.
+
+        Negotiation 발생 시 로봇을 일시정지시키기 위해 사용한다.
+
+        Args:
+            robot_name: 로봇 이름.
+            cmd_id: 명령 ID.
+
+        Returns:
+            명령 결과.
+        """
+        if not self._mqtt.is_connected:
+            logger.warning('MQTT not connected, will retry pause')
+            return RobotAPIResult.RETRY
+
+        header = self._make_header(robot_name, 'instantActions')
+        action = Action(
+            action_type='startPause',
+            action_id=f'pause_{cmd_id}_{uuid.uuid4().hex[:8]}',
+            blocking_type=BlockingType.HARD,
+        )
+
+        payload = serialize_instant_actions(header, [action])
+        topic = self._build_topic(robot_name, 'instantActions')
+        self._mqtt.publish(topic, payload, qos=0)
+
+        logger.info('Pause (startPause) sent: robot=%s', robot_name)
+        return RobotAPIResult.SUCCESS
+
     def start_activity(
         self,
         robot_name: str,

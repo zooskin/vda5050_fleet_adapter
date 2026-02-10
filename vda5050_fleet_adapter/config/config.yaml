@@ -36,6 +36,8 @@ rmf_fleet:
   robots:
     AGV_001:
       charger: "tinyRobot1_charger"
+    AGV_002:
+      charger: "tinyRobot2_charger"
   robot_state_update_frequency: 10.0
 
 # MQTT / VDA5050 CONFIG ========================================================

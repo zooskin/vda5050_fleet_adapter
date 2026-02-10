@@ -19,9 +19,9 @@ from vda5050_fleet_adapter.infra.nav_graph.graph_utils import (
 )
 from vda5050_fleet_adapter.usecase.ports.robot_api import (
     RobotAPI,
+    RobotAPIResult,
     RobotUpdateData,
 )
-from vda5050_fleet_adapter.usecase.ports.task_tracker import TaskTracker
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +40,6 @@ class RobotAdapter:
         nav_nodes: nav graph 노드 dict.
         nav_edges: nav graph 엣지 dict.
         nav_graph: networkx 그래프.
-        task_tracker: Task 최종 목적지 추적기 (optional).
     """
 
     def __init__(
@@ -52,7 +51,6 @@ class RobotAdapter:
         nav_nodes: dict,
         nav_edges: dict,
         nav_graph: Any,
-        task_tracker: TaskTracker | None = None,
     ) -> None:
         self.name = name
         self.api = api
@@ -61,7 +59,6 @@ class RobotAdapter:
         self.nav_nodes = nav_nodes
         self.nav_edges = nav_edges
         self.nav_graph = nav_graph
-        self.task_tracker = task_tracker
 
         self.execution: Any | None = None
         self.update_handle: Any | None = None
@@ -78,6 +75,9 @@ class RobotAdapter:
         # 명령 재시도 스레드 관리
         self._issue_cmd_thread: threading.Thread | None = None
         self._cancel_cmd_event = threading.Event()
+
+        # Negotiation 상태 관리
+        self._is_paused_for_negotiation: bool = False
 
         # 경로 캐시
         self._last_nodes: list[list] = []
@@ -174,20 +174,22 @@ class RobotAdapter:
             )
             return
 
-        # Task 경계 감지: current_task_id 변경 시 새 Task
-        current_task_id = self._get_current_task_id()
-        is_new_task = (
-            self._active_order_id is None
-            or (
-                current_task_id
-                and current_task_id != self._current_task_id
+        # Negotiation 처리: pause 상태에서 navigate가 호출되면
+        # cancelOrder 전송 → AGV 처리 대기 → 새 orderID로 명령
+        is_negotiation = self._is_paused_for_negotiation
+        if is_negotiation:
+            self._is_paused_for_negotiation = False
+            cancel_cmd_id = self.cmd_id
+            self.cmd_id += 1
+            logger.info(
+                'Negotiation detected for robot %s: '
+                'will send cancelOrder (cmd_id=%d) then new order',
+                self.name, cancel_cmd_id,
             )
-        )
-
-        if is_new_task:
+            current_task_id = self._get_current_task_id()
             self._current_task_id = current_task_id
             self._final_destination = (
-                self._resolve_final_destination(goal_node)
+                self._resolve_final_destination(destination, goal_node)
             )
             self._active_order_id = (
                 f'order_{self.cmd_id}_{uuid.uuid4().hex[:8]}'
@@ -195,15 +197,37 @@ class RobotAdapter:
             self._order_update_id = 0
             self._last_nodes = []
         else:
-            # Order Update: 같은 orderID, update_id 증가
-            self._order_update_id += 1
-            # Re-resolve: tracker may have received fleet_state
-            # data since the initial resolve
-            self._final_destination = (
-                self._resolve_final_destination(
-                    self._final_destination or goal_node
+            # Task 경계 감지: current_task_id 변경 시 새 Task
+            current_task_id = self._get_current_task_id()
+            is_new_task = (
+                self._active_order_id is None
+                or (
+                    current_task_id
+                    and current_task_id != self._current_task_id
                 )
             )
+
+            if is_new_task:
+                self._current_task_id = current_task_id
+                self._final_destination = (
+                    self._resolve_final_destination(
+                        destination, goal_node
+                    )
+                )
+                self._active_order_id = (
+                    f'order_{self.cmd_id}_{uuid.uuid4().hex[:8]}'
+                )
+                self._order_update_id = 0
+                self._last_nodes = []
+            else:
+                # Order Update: 같은 orderID, update_id 증가
+                self._order_update_id += 1
+                self._final_destination = (
+                    self._resolve_final_destination(
+                        destination,
+                        self._final_destination or goal_node,
+                    )
+                )
 
         # 현재 위치 기반으로 start_node 결정
         start_node = None
@@ -215,9 +239,29 @@ class RobotAdapter:
         if start_node is None:
             start_node = goal_node
 
-        # 경로 계산: current → final_destination
+        # 경로 계산: current → goal_node → final_destination
+        # RMF가 goal_node를 경유지로 지정한 경우 (negotiation, 교통 관리 등)
+        # 반드시 goal_node를 거쳐야 한다. 최단 경로로 바로 가면 안 된다.
         target = self._final_destination or goal_node
-        path = compute_path(self.nav_graph, start_node, target)
+        if goal_node != target and goal_node != start_node:
+            path_to_goal = compute_path(
+                self.nav_graph, start_node, goal_node
+            )
+            path_from_goal = compute_path(
+                self.nav_graph, goal_node, target
+            )
+            if path_to_goal and path_from_goal:
+                # goal_node 중복 제거하여 연결
+                path = path_to_goal + path_from_goal[1:]
+            elif path_to_goal:
+                path = path_to_goal
+            else:
+                path = compute_path(
+                    self.nav_graph, start_node, target
+                )
+        else:
+            path = compute_path(self.nav_graph, start_node, target)
+
         if path is None:
             path = [start_node, target]
 
@@ -250,23 +294,54 @@ class RobotAdapter:
             base_end_index,
         )
 
-        self.attempt_cmd_until_success(
-            cmd=self.api.navigate,
-            args=(
-                self.name,
-                self.cmd_id,
-                vda_nodes,
-                vda_edges,
-                map_name,
-                self._active_order_id,
-                self._order_update_id,
-            ),
+        nav_args = (
+            self.name,
+            self.cmd_id,
+            vda_nodes,
+            vda_edges,
+            map_name,
+            self._active_order_id,
+            self._order_update_id,
         )
+
+        if is_negotiation:
+            # Negotiation: cancelOrder 전송 후 AGV가 처리할 시간을 주고
+            # 새 order를 전송한다. attempt_cmd_until_success의 1초 대기를
+            # 활용하여 cancelOrder와 새 order 사이에 간격을 둔다.
+            cancel_sent = [False]
+
+            def cancel_then_navigate(*args: Any) -> RobotAPIResult:
+                if not cancel_sent[0]:
+                    self.api.stop(self.name, cancel_cmd_id)
+                    cancel_sent[0] = True
+                    logger.info(
+                        'cancelOrder sent for robot %s (cmd_id=%d), '
+                        'waiting for AGV to process before new order',
+                        self.name, cancel_cmd_id,
+                    )
+                    return RobotAPIResult.RETRY
+                return self.api.navigate(*args)
+
+            self.attempt_cmd_until_success(
+                cmd=cancel_then_navigate,
+                args=nav_args,
+            )
+        else:
+            self.attempt_cmd_until_success(
+                cmd=self.api.navigate,
+                args=nav_args,
+            )
 
     def stop(self, activity: Any) -> None:
         """RMF 정지 콜백.
 
-        Order 상태를 초기화하고 cancelOrder를 전송한다.
+        Negotiation 규칙에 따라 startPause를 즉시 전송한다.
+        Order 상태는 유지하여 이후 navigate()에서 cancelOrder +
+        새 orderID로 처리할 수 있도록 한다.
+
+        startPause는 직접 호출한다 (attempt_cmd_until_success 사용 안 함).
+        navigate()가 즉시 뒤따라올 수 있어 retry 스레드가 취소될 수 있기
+        때문이다.
 
         Args:
             activity: 정지할 activity identifier.
@@ -274,12 +349,15 @@ class RobotAdapter:
         if self.execution is not None:
             if self.execution.identifier.is_same(activity):
                 self.execution = None
-                self._reset_order_state()
+                self._is_paused_for_negotiation = True
+                self.cancel_cmd_attempt()
                 self.cmd_id += 1
-                self.attempt_cmd_until_success(
-                    cmd=self.api.stop,
-                    args=(self.name, self.cmd_id),
+                logger.info(
+                    'Stop (negotiation pause) for robot %s, '
+                    'sending startPause, cmd_id=%d',
+                    self.name, self.cmd_id,
                 )
+                self.api.pause(self.name, self.cmd_id)
 
     def execute_action(
         self, category: str, description: dict, execution: Any
@@ -359,54 +437,58 @@ class RobotAdapter:
             )
             return None
 
-    def _resolve_final_destination(self, fallback: str) -> str:
-        """Task_tracker에서 최종 목적지를 조회한다.
+    def _resolve_final_destination(
+        self, destination: Any, fallback: str,
+    ) -> str:
+        """Navigate callback의 destination에서 최종 목적지를 조회한다.
 
-        Task_tracker가 없거나 매핑이 없으면 fallback을 사용한다.
+        C++ EasyFullControl 패치로 추가된 destination.final_name을
+        사용한다. 없으면 fallback(goal_node)을 사용한다.
 
         Args:
+            destination: RMF Destination 객체.
             fallback: 조회 실패 시 사용할 목적지 (goal_node).
 
         Returns:
             최종 목적지 waypoint 이름.
         """
-        if self.task_tracker is None:
-            return fallback
-
-        task_id = self._get_current_task_id()
-        if task_id is None:
-            return fallback
-
-        destination = self.task_tracker.get_final_destination(task_id)
-        if destination is not None and destination in self.nav_nodes:
+        final_name = getattr(destination, 'final_name', '')
+        if final_name and final_name in self.nav_nodes:
             logger.info(
-                'Final destination from task_tracker: '
-                'robot=%s, task_id=%s, destination=%s',
-                self.name, task_id, destination,
+                'Final destination from Destination.final_name: '
+                'robot=%s, final_name=%s',
+                self.name, final_name,
             )
-            return destination
+            return final_name
 
-        if destination is not None and destination not in self.nav_nodes:
+        if final_name and final_name not in self.nav_nodes:
             logger.warning(
-                'Destination from task_tracker not in nav_nodes: '
-                'robot=%s, task_id=%s, destination=%s, '
-                'using fallback=%s',
-                self.name, task_id, destination, fallback,
-            )
-        else:
-            logger.warning(
-                'No final destination from task_tracker: '
-                'robot=%s, task_id=%s, destination=%s, '
-                'using fallback=%s',
-                self.name, task_id, destination, fallback,
+                'Destination.final_name not in nav_nodes: '
+                'robot=%s, final_name=%s, using fallback=%s',
+                self.name, final_name, fallback,
             )
         return fallback
 
     def _reset_order_state(self) -> None:
-        """Order 라이프사이클 상태를 초기화한다."""
+        """Order 라이프사이클 상태를 초기화한다.
+
+        Pause 상태에서 navigate 없이 task가 종료된 경우
+        cancelOrder를 전송하여 로봇의 order를 정리한다.
+        """
+        if self._is_paused_for_negotiation:
+            self._is_paused_for_negotiation = False
+            self.cmd_id += 1
+            logger.info(
+                'Task ended while paused, sending cancelOrder '
+                'for robot %s, cmd_id=%d',
+                self.name, self.cmd_id,
+            )
+            self.attempt_cmd_until_success(
+                cmd=self.api.stop,
+                args=(self.name, self.cmd_id),
+            )
+
         old_task_id = self._current_task_id
-        if self.task_tracker is not None and old_task_id:
-            self.task_tracker.clear_booking(old_task_id)
         self._active_order_id = None
         self._order_update_id = 0
         self._final_destination = None

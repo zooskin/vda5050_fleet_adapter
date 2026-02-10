@@ -31,9 +31,6 @@ from vda5050_fleet_adapter.infra.nav_graph.graph_utils import (
     create_graph,
     parse_nav_graph,
 )
-from vda5050_fleet_adapter.infra.ros.task_api_listener import (
-    TaskApiListener,
-)
 from vda5050_fleet_adapter.usecase.ports.config_port import MqttConfig
 from vda5050_fleet_adapter.usecase.robot_adapter import RobotAdapter
 import yaml
@@ -146,7 +143,7 @@ def main(argv: list[str] | None = None) -> None:
     time.sleep(1.0)
 
     # 4. Nav graph 파싱
-    nav_nodes, nav_edges, index_to_name = parse_nav_graph(nav_graph_path)
+    nav_nodes, nav_edges, _index_to_name = parse_nav_graph(nav_graph_path)
     nav_graph = create_graph(nav_nodes, nav_edges)
 
     # 5. 좌표 변환 (reference_coordinates 있으면)
@@ -191,9 +188,6 @@ def main(argv: list[str] | None = None) -> None:
         f'prefix: {prefix}'
     )
 
-    # 7.5. Task API Listener 생성
-    task_tracker = TaskApiListener(node, fleet_name, index_to_name)
-
     # 8. 로봇별 RobotAdapter 생성
     node.get_logger().info(f'known_robots: {fleet_config.known_robots}')
     robots: dict[str, RobotAdapter] = {}
@@ -215,7 +209,6 @@ def main(argv: list[str] | None = None) -> None:
             nav_nodes=nav_nodes,
             nav_edges=nav_edges,
             nav_graph=nav_graph,
-            task_tracker=task_tracker,
         )
         robot.configuration = robot_config
         robots[robot_name] = robot
