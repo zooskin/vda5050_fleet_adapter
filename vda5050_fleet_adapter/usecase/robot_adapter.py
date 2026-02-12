@@ -294,9 +294,11 @@ class RobotAdapter:
 
         # 최종목적지까지 경로 보장: path에 최종목적지가 없으면
         # 현재 경로 끝에서 최종목적지까지의 경로를 Horizon으로 추가한다.
+        # target == goal_node인 경우에도 확인한다 (final_name 미제공 시
+        # fallback으로 goal_node가 target이 되지만, stale planned_path
+        # 등으로 path에 빠질 수 있음).
         if (
             target
-            and target != goal_node
             and path
             and target not in path
         ):
