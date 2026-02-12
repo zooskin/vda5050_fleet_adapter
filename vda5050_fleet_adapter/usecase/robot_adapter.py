@@ -243,7 +243,7 @@ class RobotAdapter:
         if start_node is None:
             start_node = goal_node
 
-        # RMF planned path 사용 (topic 수신), 없으면 fallback
+        # ── Step 1: RMF planned path 확보 ──
         target = self._final_destination or goal_node
         rmf_path = self._get_planned_path()
 
@@ -271,32 +271,21 @@ class RobotAdapter:
                 'No RMF planned path for %s, fallback to compute_path',
                 self.name,
             )
-            if goal_node != target and goal_node != start_node:
-                path_to_goal = compute_path(
-                    self.nav_graph, start_node, goal_node
-                )
-                path_from_goal = compute_path(
-                    self.nav_graph, goal_node, target
-                )
-                if path_to_goal and path_from_goal:
-                    path = path_to_goal + path_from_goal[1:]
-                elif path_to_goal:
-                    path = path_to_goal
-                else:
-                    path = compute_path(
-                        self.nav_graph, start_node, target
-                    )
-            else:
-                path = compute_path(self.nav_graph, start_node, target)
+            path = compute_path(
+                self.nav_graph, start_node, goal_node
+            )
 
         if path is None:
-            path = [start_node, target]
+            path = [start_node, goal_node]
 
-        # 최종목적지까지 경로 보장: path에 최종목적지가 없으면
-        # 현재 경로 끝에서 최종목적지까지의 경로를 Horizon으로 추가한다.
-        # target == goal_node인 경우에도 확인한다 (final_name 미제공 시
-        # fallback으로 goal_node가 target이 되지만, stale planned_path
-        # 등으로 path에 빠질 수 있음).
+        # ── Step 2: 3-tier 경로 구성 ──
+        # tier 1 (Base):    path[0 : base_end_index+1]
+        # tier 2 (Horizon): path[base_end_index+1 : rmf_path_end+1]
+        # tier 3 (Horizon): path[rmf_path_end+1 :]
+        rmf_path_end = len(path) - 1
+
+        # Tier 3 확장: path에 최종목적지가 없으면
+        # 현재 경로 끝에서 최종목적지까지의 경로를 Horizon으로 추가
         if (
             target
             and path
@@ -308,9 +297,9 @@ class RobotAdapter:
             if extension and len(extension) > 1:
                 path = path + extension[1:]
                 logger.info(
-                    'Extended path to final destination for %s: '
-                    '%s -> %s (appended %s)',
-                    self.name, path[-len(extension)],
+                    'Tier3 extension for %s: %s -> %s '
+                    '(appended %s)',
+                    self.name, extension[0],
                     target, extension[1:],
                 )
             else:
@@ -328,7 +317,17 @@ class RobotAdapter:
         else:
             base_end_index = len(path) - 1
 
-        # VDA5050 Node/Edge 생성 (Base/Horizon 분리)
+        logger.info(
+            'Navigate [%s] 3-tier path: '
+            'Base(tier1)=%s, Horizon-RMF(tier2)=%s, '
+            'Horizon-ext(tier3)=%s',
+            self.name,
+            path[:base_end_index + 1],
+            path[base_end_index + 1:rmf_path_end + 1],
+            path[rmf_path_end + 1:],
+        )
+
+        # ── Step 3: VDA5050 Node/Edge 생성 ──
         map_name = destination.map
         vda_nodes, vda_edges = build_vda5050_nodes_edges(
             path, self.nav_nodes, map_name,
