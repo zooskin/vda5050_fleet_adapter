@@ -82,6 +82,11 @@ class RobotAdapter:
         # 경로 캐시
         self._last_nodes: list[list] = []
 
+        # RMF planned path cache (ROS topic 구독으로 업데이트)
+        self._planned_path_lock = threading.Lock()
+        self._rmf_planned_path: list[str] | None = None
+        self._planned_path_event = threading.Event()
+
     def update(self, state: Any, data: RobotUpdateData) -> None:
         """주기적 상태 업데이트.
 
@@ -239,31 +244,87 @@ class RobotAdapter:
         if start_node is None:
             start_node = goal_node
 
-        # 경로 계산: current → goal_node → final_destination
-        # RMF가 goal_node를 경유지로 지정한 경우 (negotiation, 교통 관리 등)
-        # 반드시 goal_node를 거쳐야 한다. 최단 경로로 바로 가면 안 된다.
+        # ── Step 1: RMF planned path 확보 ──
+        # planned_path 토픽은 DDS를 경유하므로 navigate() 콜백보다
+        # 늦게 도착할 수 있다. Event로 짧게 대기하여 수신을 보장한다.
         target = self._final_destination or goal_node
-        if goal_node != target and goal_node != start_node:
-            path_to_goal = compute_path(
+        self._planned_path_event.clear()
+        rmf_path = self._get_planned_path()
+        if rmf_path is None:
+            if self._planned_path_event.wait(timeout=0.1):
+                rmf_path = self._get_planned_path()
+                logger.info(
+                    'Planned path arrived after wait for %s',
+                    self.name,
+                )
+
+        if rmf_path is not None:
+            # RMF planned path는 sparse할 수 있다 (중간 노드 생략).
+            # 인접하지 않은 노드 쌍 사이를 compute_path로 보간한다.
+            rmf_path = self._interpolate_path(rmf_path)
+
+            # RMF 경로에서 현재 위치부터 잘라 사용
+            if start_node in rmf_path:
+                start_idx = rmf_path.index(start_node)
+                path = rmf_path[start_idx:]
+            elif rmf_path:
+                bridge = compute_path(
+                    self.nav_graph, start_node, rmf_path[0]
+                )
+                if bridge:
+                    path = bridge[:-1] + rmf_path
+                else:
+                    path = rmf_path
+            else:
+                path = None
+            logger.info(
+                'Using RMF planned path for %s: %s',
+                self.name, path,
+            )
+        else:
+            logger.info(
+                'No RMF planned path for %s, fallback to compute_path',
+                self.name,
+            )
+            path = compute_path(
                 self.nav_graph, start_node, goal_node
             )
-            path_from_goal = compute_path(
-                self.nav_graph, goal_node, target
-            )
-            if path_to_goal and path_from_goal:
-                # goal_node 중복 제거하여 연결
-                path = path_to_goal + path_from_goal[1:]
-            elif path_to_goal:
-                path = path_to_goal
-            else:
-                path = compute_path(
-                    self.nav_graph, start_node, target
-                )
-        else:
-            path = compute_path(self.nav_graph, start_node, target)
 
         if path is None:
-            path = [start_node, target]
+            path = [start_node, goal_node]
+
+        # ── Step 2: 3-tier 경로 구성 ──
+        # tier 1 (Base):    path[0 : base_end_index+1]
+        # tier 2 (Horizon): path[base_end_index+1 : rmf_path_end+1]
+        # tier 3 (Horizon): path[rmf_path_end+1 :]
+        rmf_path_end = len(path) - 1
+
+        # Tier 3 확장: path에 최종목적지가 없으면
+        # 현재 경로 끝에서 최종목적지까지의 경로를 Horizon으로 추가
+        if (
+            target
+            and path
+            and target not in path
+        ):
+            extension = compute_path(
+                self.nav_graph, path[-1], target
+            )
+            if extension and len(extension) > 1:
+                path = path + extension[1:]
+                logger.info(
+                    'Tier3 extension for %s: %s -> %s '
+                    '(appended %s)',
+                    self.name, extension[0],
+                    target, extension[1:],
+                )
+            else:
+                # 경로 계산 불가 시 최종목적지만 직접 추가
+                path.append(target)
+                logger.warning(
+                    'Cannot compute path to final destination '
+                    '%s for robot %s, appended directly',
+                    target, self.name,
+                )
 
         # goal_node의 path 내 인덱스 찾기 → base_end_index
         if goal_node in path:
@@ -271,7 +332,17 @@ class RobotAdapter:
         else:
             base_end_index = len(path) - 1
 
-        # VDA5050 Node/Edge 생성 (Base/Horizon 분리)
+        logger.info(
+            'Navigate [%s] 3-tier path: '
+            'Base(tier1)=%s, Horizon-RMF(tier2)=%s, '
+            'Horizon-ext(tier3)=%s',
+            self.name,
+            path[:base_end_index + 1],
+            path[base_end_index + 1:rmf_path_end + 1],
+            path[rmf_path_end + 1:],
+        )
+
+        # ── Step 3: VDA5050 Node/Edge 생성 ──
         map_name = destination.map
         vda_nodes, vda_edges = build_vda5050_nodes_edges(
             path, self.nav_nodes, map_name,
@@ -488,6 +559,10 @@ class RobotAdapter:
                 args=(self.name, self.cmd_id),
             )
 
+        with self._planned_path_lock:
+            self._rmf_planned_path = None
+        self._planned_path_event.clear()
+
         old_task_id = self._current_task_id
         self._active_order_id = None
         self._order_update_id = 0
@@ -507,3 +582,62 @@ class RobotAdapter:
                 self._issue_cmd_thread.join(timeout=5.0)
             self._issue_cmd_thread = None
         self._cancel_cmd_event.clear()
+
+    def update_planned_path(self, path_data: dict) -> None:
+        """ROS topic에서 수신한 RMF planned path를 캐시한다."""
+        path = path_data.get('path')
+        if not path or not isinstance(path, list):
+            return
+        with self._planned_path_lock:
+            self._rmf_planned_path = list(path)
+        self._planned_path_event.set()
+        logger.info(
+            'Planned path updated for %s: %s', self.name, path,
+        )
+
+    def _get_planned_path(self) -> list[str] | None:
+        """캐시된 planned path를 조회한다. 유효하지 않으면 None."""
+        with self._planned_path_lock:
+            if self._rmf_planned_path is None:
+                return None
+            for wp_name in self._rmf_planned_path:
+                if wp_name not in self.nav_nodes:
+                    logger.warning(
+                        'Planned path has unknown node %s for %s',
+                        wp_name, self.name,
+                    )
+                    return None
+            return list(self._rmf_planned_path)
+
+    def _interpolate_path(self, sparse_path: list[str]) -> list[str]:
+        """Sparse path의 인접하지 않은 노드 쌍 사이를 보간한다.
+
+        RMF planned_path는 주요 waypoint만 포함할 수 있다
+        (예: [1,3,5] → [1,2,3,4,5]). 각 연속 노드 쌍에 대해
+        nav_graph에 직접 edge가 없으면 compute_path로 중간 노드를 채운다.
+
+        Args:
+            sparse_path: 중간 노드가 빠진 경로.
+
+        Returns:
+            중간 노드가 채워진 경로.
+        """
+        if len(sparse_path) < 2:
+            return sparse_path
+
+        full: list[str] = [sparse_path[0]]
+        for i in range(len(sparse_path) - 1):
+            a, b = sparse_path[i], sparse_path[i + 1]
+            if self.nav_graph.has_edge(a, b):
+                full.append(b)
+            else:
+                segment = compute_path(self.nav_graph, a, b)
+                if segment and len(segment) > 1:
+                    full.extend(segment[1:])
+                else:
+                    full.append(b)
+        logger.debug(
+            'Interpolated path for %s: %s -> %s',
+            self.name, sparse_path, full,
+        )
+        return full
