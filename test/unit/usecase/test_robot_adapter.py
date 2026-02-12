@@ -1228,3 +1228,240 @@ class TestPlannedPath:
         assert node_ids[0] == 'wp4'
         assert 'wp2' in node_ids
         assert 'wp3' in node_ids
+
+
+class TestTJunctionDetourWithPlannedPath:
+    """T자 교차로 회피 시나리오: planned_path에 전체 회피경로 포함.
+
+    Graph:
+        A(0,0) --- B(5,0) --- C(10,0)
+                     |
+                   D(5,5)
+
+    시나리오: Robot1(A→C) 이동 중 Robot2와 충돌 회피를 위해
+    D로 우회. RMF planner가 전체 경로 [A,B,D,B,C]를 planned_path로
+    publish하고, navigate(dest=B, final=C)를 호출한다.
+    """
+
+    @pytest.fixture
+    def t_adapter(self, mock_api, mock_node):
+        """T자 그래프 어댑터 (detour_adapter와 동일 토폴로지)."""
+        from vda5050_fleet_adapter.infra.nav_graph.graph_utils import (
+            create_graph,
+        )
+        nodes = {
+            'A': {'x': 0.0, 'y': 0.0, 'attributes': {}},
+            'B': {'x': 5.0, 'y': 0.0, 'attributes': {}},
+            'C': {'x': 10.0, 'y': 0.0, 'attributes': {}},
+            'D': {'x': 5.0, 'y': 5.0, 'attributes': {}},
+        }
+        edges = {
+            'e0': {'start': 'A', 'end': 'B', 'attributes': {}},
+            'e1': {'start': 'B', 'end': 'A', 'attributes': {}},
+            'e2': {'start': 'B', 'end': 'C', 'attributes': {}},
+            'e3': {'start': 'C', 'end': 'B', 'attributes': {}},
+            'e4': {'start': 'B', 'end': 'D', 'attributes': {}},
+            'e5': {'start': 'D', 'end': 'B', 'attributes': {}},
+        }
+        graph = create_graph(nodes, edges)
+        robot = RobotAdapter(
+            name='AGV-001', api=mock_api, node=mock_node,
+            fleet_handle=MagicMock(),
+            nav_nodes=nodes, nav_edges=edges, nav_graph=graph,
+        )
+        robot.configuration = MagicMock()
+        mock_handle = MagicMock()
+        mock_handle.more.return_value.current_task_id \
+            .return_value = 'task-001'
+        robot.update_handle = mock_handle
+        return robot
+
+    def test_planned_path_full_detour_route(
+        self, t_adapter, mock_api
+    ):
+        """planned_path=[A,B,D,B,C] → 전체 회피경로 그대로 사용."""
+        t_adapter.position = [0.0, 0.0, 0.0]  # at A
+        t_adapter.update_planned_path({
+            'robot_name': 'AGV-001',
+            'path': ['A', 'B', 'D', 'B', 'C'],
+        })
+
+        dest = MagicMock()
+        dest.name = 'B'
+        dest.final_name = 'C'
+        dest.position = [5.0, 0.0, 0.0]
+        dest.map = 'L1'
+        execution = MagicMock()
+
+        t_adapter.navigate(dest, execution)
+        t_adapter.cancel_cmd_attempt()
+
+        call_args = mock_api.navigate.call_args[0]
+        nodes = call_args[2]
+        node_ids = [n.node_id for n in nodes]
+
+        # 전체 경로: A → B → D → B → C
+        assert node_ids == ['A', 'B', 'D', 'B', 'C']
+
+    def test_planned_path_detour_3tier_split(
+        self, t_adapter, mock_api
+    ):
+        """3-tier 분리: Base=[A,B], Horizon-RMF=[D,B,C], ext=[]."""
+        t_adapter.position = [0.0, 0.0, 0.0]
+        t_adapter.update_planned_path({
+            'robot_name': 'AGV-001',
+            'path': ['A', 'B', 'D', 'B', 'C'],
+        })
+
+        dest = MagicMock()
+        dest.name = 'B'
+        dest.final_name = 'C'
+        dest.position = [5.0, 0.0, 0.0]
+        dest.map = 'L1'
+        execution = MagicMock()
+
+        t_adapter.navigate(dest, execution)
+        t_adapter.cancel_cmd_attempt()
+
+        call_args = mock_api.navigate.call_args[0]
+        nodes = call_args[2]
+
+        # tier1 (Base): A, B → released=True
+        assert nodes[0].node_id == 'A'
+        assert nodes[0].released is True
+        assert nodes[1].node_id == 'B'
+        assert nodes[1].released is True
+
+        # tier2 (Horizon-RMF): D, B, C → released=False
+        assert nodes[2].node_id == 'D'
+        assert nodes[2].released is False
+        assert nodes[3].node_id == 'B'
+        assert nodes[3].released is False
+        assert nodes[4].node_id == 'C'
+        assert nodes[4].released is False
+
+    def test_planned_path_detour_no_tier3_extension(
+        self, t_adapter, mock_api
+    ):
+        """C가 planned_path에 포함되어 있으므로 tier3 확장 불필요."""
+        t_adapter.position = [0.0, 0.0, 0.0]
+        t_adapter.update_planned_path({
+            'robot_name': 'AGV-001',
+            'path': ['A', 'B', 'D', 'B', 'C'],
+        })
+
+        dest = MagicMock()
+        dest.name = 'B'
+        dest.final_name = 'C'
+        dest.position = [5.0, 0.0, 0.0]
+        dest.map = 'L1'
+        execution = MagicMock()
+
+        t_adapter.navigate(dest, execution)
+        t_adapter.cancel_cmd_attempt()
+
+        call_args = mock_api.navigate.call_args[0]
+        nodes = call_args[2]
+        node_ids = [n.node_id for n in nodes]
+
+        # 정확히 5개 노드 (확장 없음)
+        assert len(node_ids) == 5
+        # 마지막 노드가 C
+        assert node_ids[-1] == 'C'
+
+    def test_planned_path_detour_second_navigate(
+        self, t_adapter, mock_api
+    ):
+        """D 도착 후 두 번째 navigate(dest=B, final=C).
+
+        Robot이 D에 도착, RMF가 다시 planned_path=[D,B,C] publish.
+        navigate(dest=B, final=C) → D(base)→B(base)→C(horizon).
+        """
+        # 첫 navigate (task 시작)
+        t_adapter.position = [0.0, 0.0, 0.0]
+        t_adapter.update_planned_path({
+            'robot_name': 'AGV-001',
+            'path': ['A', 'B', 'D', 'B', 'C'],
+        })
+        dest1 = MagicMock()
+        dest1.name = 'B'
+        dest1.final_name = 'C'
+        dest1.position = [5.0, 0.0, 0.0]
+        dest1.map = 'L1'
+        execution1 = MagicMock()
+        t_adapter.navigate(dest1, execution1)
+        t_adapter.cancel_cmd_attempt()
+
+        # D에 도착, 새 planned_path 수신
+        t_adapter.position = [5.0, 5.0, 0.0]  # at D
+        t_adapter.update_planned_path({
+            'robot_name': 'AGV-001',
+            'path': ['D', 'B', 'C'],
+        })
+
+        dest2 = MagicMock()
+        dest2.name = 'B'
+        dest2.final_name = 'C'
+        dest2.position = [5.0, 0.0, 0.0]
+        dest2.map = 'L1'
+        execution2 = MagicMock()
+        t_adapter.navigate(dest2, execution2)
+        t_adapter.cancel_cmd_attempt()
+
+        call_args = mock_api.navigate.call_args[0]
+        nodes = call_args[2]
+        node_ids = [n.node_id for n in nodes]
+
+        # D → B → C
+        assert node_ids == ['D', 'B', 'C']
+        # D, B = Base (dest=B까지)
+        assert nodes[0].released is True   # D
+        assert nodes[1].released is True   # B
+        # C = Horizon
+        assert nodes[2].released is False  # C
+
+    def test_planned_path_detour_final_navigate(
+        self, t_adapter, mock_api
+    ):
+        """B 도착 후 마지막 navigate(dest=C, final=C).
+
+        Robot이 B에 도착, RMF가 planned_path=[B,C] publish.
+        navigate(dest=C, final=C) → B(base)→C(base), 모두 released.
+        """
+        # 첫 navigate (task 시작)
+        t_adapter.position = [0.0, 0.0, 0.0]
+        t_adapter.update_planned_path({
+            'robot_name': 'AGV-001',
+            'path': ['A', 'B', 'D', 'B', 'C'],
+        })
+        dest1 = MagicMock()
+        dest1.name = 'B'
+        dest1.final_name = 'C'
+        dest1.position = [5.0, 0.0, 0.0]
+        dest1.map = 'L1'
+        t_adapter.navigate(dest1, MagicMock())
+        t_adapter.cancel_cmd_attempt()
+
+        # B에 도착, 마지막 segment
+        t_adapter.position = [5.0, 0.0, 0.0]  # at B
+        t_adapter.update_planned_path({
+            'robot_name': 'AGV-001',
+            'path': ['B', 'C'],
+        })
+
+        dest3 = MagicMock()
+        dest3.name = 'C'
+        dest3.final_name = 'C'
+        dest3.position = [10.0, 0.0, 0.0]
+        dest3.map = 'L1'
+        t_adapter.navigate(dest3, MagicMock())
+        t_adapter.cancel_cmd_attempt()
+
+        call_args = mock_api.navigate.call_args[0]
+        nodes = call_args[2]
+        node_ids = [n.node_id for n in nodes]
+
+        # B → C, 모두 Base (dest == final)
+        assert node_ids == ['B', 'C']
+        assert nodes[0].released is True   # B
+        assert nodes[1].released is True   # C
