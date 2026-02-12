@@ -85,6 +85,7 @@ class RobotAdapter:
         # RMF planned path cache (ROS topic 구독으로 업데이트)
         self._planned_path_lock = threading.Lock()
         self._rmf_planned_path: list[str] | None = None
+        self._planned_path_event = threading.Event()
 
     def update(self, state: Any, data: RobotUpdateData) -> None:
         """주기적 상태 업데이트.
@@ -244,8 +245,18 @@ class RobotAdapter:
             start_node = goal_node
 
         # ── Step 1: RMF planned path 확보 ──
+        # planned_path 토픽은 DDS를 경유하므로 navigate() 콜백보다
+        # 늦게 도착할 수 있다. Event로 짧게 대기하여 수신을 보장한다.
         target = self._final_destination or goal_node
+        self._planned_path_event.clear()
         rmf_path = self._get_planned_path()
+        if rmf_path is None:
+            if self._planned_path_event.wait(timeout=0.1):
+                rmf_path = self._get_planned_path()
+                logger.info(
+                    'Planned path arrived after wait for %s',
+                    self.name,
+                )
 
         if rmf_path is not None:
             # RMF 경로에서 현재 위치부터 잘라 사용
@@ -546,6 +557,7 @@ class RobotAdapter:
 
         with self._planned_path_lock:
             self._rmf_planned_path = None
+        self._planned_path_event.clear()
 
         old_task_id = self._current_task_id
         self._active_order_id = None
@@ -574,6 +586,7 @@ class RobotAdapter:
             return
         with self._planned_path_lock:
             self._rmf_planned_path = list(path)
+        self._planned_path_event.set()
         logger.info(
             'Planned path updated for %s: %s', self.name, path,
         )
