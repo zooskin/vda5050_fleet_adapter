@@ -292,6 +292,34 @@ class RobotAdapter:
         if path is None:
             path = [start_node, target]
 
+        # 최종목적지까지 경로 보장: path에 최종목적지가 없으면
+        # 현재 경로 끝에서 최종목적지까지의 경로를 Horizon으로 추가한다.
+        if (
+            target
+            and target != goal_node
+            and path
+            and target not in path
+        ):
+            extension = compute_path(
+                self.nav_graph, path[-1], target
+            )
+            if extension and len(extension) > 1:
+                path = path + extension[1:]
+                logger.info(
+                    'Extended path to final destination for %s: '
+                    '%s -> %s (appended %s)',
+                    self.name, path[-len(extension)],
+                    target, extension[1:],
+                )
+            else:
+                # 경로 계산 불가 시 최종목적지만 직접 추가
+                path.append(target)
+                logger.warning(
+                    'Cannot compute path to final destination '
+                    '%s for robot %s, appended directly',
+                    target, self.name,
+                )
+
         # goal_node의 path 내 인덱스 찾기 → base_end_index
         if goal_node in path:
             base_end_index = path.index(goal_node)
