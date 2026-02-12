@@ -1592,3 +1592,49 @@ class TestSparsePathInterpolation:
         node_ids = [n.node_id for n in nodes]
 
         assert node_ids == ['n1', 'n2', 'n3']
+
+    def test_sparse_path_includes_pre_destination_nodes(
+        self, linear_adapter, mock_api
+    ):
+        """planned_path에 destination 이전 노드 포함 시 중복 없음.
+
+        planned_path=[n1,n3,n5], dest=n2, final=n7
+        → interpolated=[n1,n2,n3,n4,n5]
+        → start=n1부터 slice → [n1,n2,n3,n4,n5]
+        → tier3 extension → [n1,n2,n3,n4,n5,n6,n7]
+        → 중복 노드 없어야 함.
+        """
+        linear_adapter.position = [1.0, 0.0, 0.0]  # at n1
+        linear_adapter.update_planned_path({
+            'robot_name': 'AGV-001',
+            'path': ['n1', 'n3', 'n5'],
+        })
+
+        dest = MagicMock()
+        dest.name = 'n2'
+        dest.final_name = 'n7'
+        dest.position = [2.0, 0.0, 0.0]
+        dest.map = 'L1'
+
+        linear_adapter.navigate(dest, MagicMock())
+        linear_adapter.cancel_cmd_attempt()
+
+        call_args = mock_api.navigate.call_args[0]
+        nodes = call_args[2]
+        node_ids = [n.node_id for n in nodes]
+
+        # 전체 경로: 중복 없이 n1→n2→n3→n4→n5→n6→n7
+        assert node_ids == [
+            'n1', 'n2', 'n3', 'n4', 'n5', 'n6', 'n7',
+        ]
+        # 중복 노드 없음
+        for i, nid in enumerate(node_ids):
+            assert nid not in node_ids[i+1:i+2], (
+                f'Duplicate adjacent node: {nid}'
+            )
+
+        # Base: n1, n2 (dest까지), Horizon: n3~n7
+        assert nodes[0].released is True   # n1
+        assert nodes[1].released is True   # n2 (dest)
+        assert nodes[2].released is False  # n3
+        assert nodes[6].released is False  # n7
