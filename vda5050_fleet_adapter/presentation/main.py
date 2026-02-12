@@ -230,7 +230,12 @@ def main(argv: list[str] | None = None) -> None:
             node.get_logger().warning('Invalid JSON in planned_path')
             return
         robot_name = data.get('robot_name', '')
-        if robot_name in robots:
+        # C++ requester_id()는 "fleet/robot" 형식이므로
+        # fleet prefix를 제거하여 robots dict key와 매칭
+        short_name = robot_name.rsplit('/', 1)[-1]
+        if short_name in robots:
+            robots[short_name].update_planned_path(data)
+        elif robot_name in robots:
             robots[robot_name].update_planned_path(data)
 
     node.create_subscription(
