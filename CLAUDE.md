@@ -85,6 +85,7 @@ python -m pytest test/
   - destination까지 Base - rmf core에서 받은 경로까지 horizon - 나머지 최종 목적지 까지 horizon
 - order update 시 : rmf core에서 새로운 Destination이 내려오면 해당 Destination까지 Base로 만들고, rmf core에서 받은 경로까지 Horizon에 포함 시키고, 이후에 최종 목적지까지의 경로를 Horizon으로 추가한다.
 - 최종 목적지 란 : 최종목적지는, rmf core에 명령 넣은 로봇의 최종 도착지 이다. 예를 들어 ros2 run rmf_demos_tasks dispatch_go_to_place -p pantry 이렇게 터미널에서 명령을 주면 "pantry"가 최종 목적지가 된다. 
+  - cart_delivery처럼 phase가 2개 이상으로 나눠진경우, 최종목적지는 각 phase에 목적지가 된다.
 - order 예시 :
   - 최종목적지 = 5, 로봇 출발지 1 , 중간 경유지 2,3,4
   - rmf core에서 받은 경로가 [1,2,3,4]이고 첫번째 destination이 3이면: 1(base)-2(base)-3(base)-4(horizon, rmf경로)-5(horizon, 최종목적지까지 추가)
