@@ -1465,3 +1465,130 @@ class TestTJunctionDetourWithPlannedPath:
         assert node_ids == ['B', 'C']
         assert nodes[0].released is True   # B
         assert nodes[1].released is True   # C
+
+
+class TestSparsePathInterpolation:
+    """Sparse planned_path (중간 노드 생략) 보간 테스트.
+
+    Graph (직렬):
+        n1 -- n2 -- n3 -- n4 -- n5 -- n6 -- n7
+
+    RMF planned_path가 [n1, n3, n5, n7]처럼 중간 노드를 생략하면
+    compute_path로 보간하여 [n1, n2, n3, n4, n5, n6, n7]을 만든다.
+    """
+
+    @pytest.fixture
+    def linear_adapter(self, mock_api, mock_node):
+        """직렬 7노드 그래프 어댑터."""
+        from vda5050_fleet_adapter.infra.nav_graph.graph_utils import (
+            create_graph,
+        )
+        nodes = {
+            f'n{i}': {'x': float(i), 'y': 0.0, 'attributes': {}}
+            for i in range(1, 8)
+        }
+        edges = {}
+        for i in range(1, 7):
+            edges[f'e{i}f'] = {
+                'start': f'n{i}', 'end': f'n{i+1}',
+                'attributes': {},
+            }
+            edges[f'e{i}r'] = {
+                'start': f'n{i+1}', 'end': f'n{i}',
+                'attributes': {},
+            }
+        graph = create_graph(nodes, edges)
+        robot = RobotAdapter(
+            name='AGV-001', api=mock_api, node=mock_node,
+            fleet_handle=MagicMock(),
+            nav_nodes=nodes, nav_edges=edges, nav_graph=graph,
+        )
+        robot.configuration = MagicMock()
+        mock_handle = MagicMock()
+        mock_handle.more.return_value.current_task_id \
+            .return_value = 'task-001'
+        robot.update_handle = mock_handle
+        return robot
+
+    def test_sparse_path_interpolated(
+        self, linear_adapter, mock_api
+    ):
+        """[n1,n3,n5,n7] → [n1,n2,n3,n4,n5,n6,n7]로 보간."""
+        linear_adapter.position = [1.0, 0.0, 0.0]  # at n1
+        linear_adapter.update_planned_path({
+            'robot_name': 'AGV-001',
+            'path': ['n1', 'n3', 'n5', 'n7'],
+        })
+
+        dest = MagicMock()
+        dest.name = 'n3'
+        dest.final_name = 'n7'
+        dest.position = [3.0, 0.0, 0.0]
+        dest.map = 'L1'
+
+        linear_adapter.navigate(dest, MagicMock())
+        linear_adapter.cancel_cmd_attempt()
+
+        call_args = mock_api.navigate.call_args[0]
+        nodes = call_args[2]
+        node_ids = [n.node_id for n in nodes]
+
+        assert node_ids == ['n1', 'n2', 'n3', 'n4', 'n5', 'n6', 'n7']
+
+    def test_sparse_path_3tier_split(
+        self, linear_adapter, mock_api
+    ):
+        """보간 후 3-tier 분리: dest=n3, final=n7."""
+        linear_adapter.position = [1.0, 0.0, 0.0]
+        linear_adapter.update_planned_path({
+            'robot_name': 'AGV-001',
+            'path': ['n1', 'n3', 'n5', 'n7'],
+        })
+
+        dest = MagicMock()
+        dest.name = 'n3'
+        dest.final_name = 'n7'
+        dest.position = [3.0, 0.0, 0.0]
+        dest.map = 'L1'
+
+        linear_adapter.navigate(dest, MagicMock())
+        linear_adapter.cancel_cmd_attempt()
+
+        call_args = mock_api.navigate.call_args[0]
+        nodes = call_args[2]
+
+        # tier1 (Base): n1, n2, n3 → released=True
+        for i in range(3):
+            assert nodes[i].released is True, (
+                f'{nodes[i].node_id} should be base'
+            )
+        # tier2 (Horizon-RMF): n4, n5, n6, n7 → released=False
+        for i in range(3, 7):
+            assert nodes[i].released is False, (
+                f'{nodes[i].node_id} should be horizon'
+            )
+
+    def test_adjacent_path_unchanged(
+        self, linear_adapter, mock_api
+    ):
+        """이미 연속된 경로 [n1,n2,n3]은 변경 없음."""
+        linear_adapter.position = [1.0, 0.0, 0.0]
+        linear_adapter.update_planned_path({
+            'robot_name': 'AGV-001',
+            'path': ['n1', 'n2', 'n3'],
+        })
+
+        dest = MagicMock()
+        dest.name = 'n2'
+        dest.final_name = 'n3'
+        dest.position = [2.0, 0.0, 0.0]
+        dest.map = 'L1'
+
+        linear_adapter.navigate(dest, MagicMock())
+        linear_adapter.cancel_cmd_attempt()
+
+        call_args = mock_api.navigate.call_args[0]
+        nodes = call_args[2]
+        node_ids = [n.node_id for n in nodes]
+
+        assert node_ids == ['n1', 'n2', 'n3']

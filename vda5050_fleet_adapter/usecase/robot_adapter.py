@@ -259,6 +259,10 @@ class RobotAdapter:
                 )
 
         if rmf_path is not None:
+            # RMF planned path는 sparse할 수 있다 (중간 노드 생략).
+            # 인접하지 않은 노드 쌍 사이를 compute_path로 보간한다.
+            rmf_path = self._interpolate_path(rmf_path)
+
             # RMF 경로에서 현재 위치부터 잘라 사용
             if start_node in rmf_path:
                 start_idx = rmf_path.index(start_node)
@@ -604,3 +608,36 @@ class RobotAdapter:
                     )
                     return None
             return list(self._rmf_planned_path)
+
+    def _interpolate_path(self, sparse_path: list[str]) -> list[str]:
+        """Sparse path의 인접하지 않은 노드 쌍 사이를 보간한다.
+
+        RMF planned_path는 주요 waypoint만 포함할 수 있다
+        (예: [1,3,5] → [1,2,3,4,5]). 각 연속 노드 쌍에 대해
+        nav_graph에 직접 edge가 없으면 compute_path로 중간 노드를 채운다.
+
+        Args:
+            sparse_path: 중간 노드가 빠진 경로.
+
+        Returns:
+            중간 노드가 채워진 경로.
+        """
+        if len(sparse_path) < 2:
+            return sparse_path
+
+        full: list[str] = [sparse_path[0]]
+        for i in range(len(sparse_path) - 1):
+            a, b = sparse_path[i], sparse_path[i + 1]
+            if self.nav_graph.has_edge(a, b):
+                full.append(b)
+            else:
+                segment = compute_path(self.nav_graph, a, b)
+                if segment and len(segment) > 1:
+                    full.extend(segment[1:])
+                else:
+                    full.append(b)
+        logger.debug(
+            'Interpolated path for %s: %s -> %s',
+            self.name, sparse_path, full,
+        )
+        return full
