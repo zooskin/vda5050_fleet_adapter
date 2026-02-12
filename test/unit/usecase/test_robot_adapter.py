@@ -1069,3 +1069,162 @@ class TestStartNodeFix:
         # First node should be wp1 (nearest to 0,0)
         if nodes:
             assert nodes[0].node_id == 'wp1'
+
+
+class TestPlannedPath:
+    """RMF planned path topic 기반 경로 사용 테스트."""
+
+    def test_update_and_get_planned_path(self, adapter):
+        """update_planned_path로 캐시 저장 후 _get_planned_path로 조회."""
+        path_data = {
+            'robot_name': 'AGV-001',
+            'path': ['wp1', 'wp2', 'wp3'],
+        }
+        adapter.update_planned_path(path_data)
+
+        result = adapter._get_planned_path()
+        assert result == ['wp1', 'wp2', 'wp3']
+
+    def test_get_planned_path_none_when_empty(self, adapter):
+        """캐시가 비어있으면 None을 반환한다."""
+        assert adapter._get_planned_path() is None
+
+    def test_get_planned_path_none_for_unknown_nodes(self, adapter):
+        """미지 노드가 포함된 경로는 None을 반환한다."""
+        path_data = {
+            'robot_name': 'AGV-001',
+            'path': ['wp1', 'unknown_wp', 'wp3'],
+        }
+        adapter.update_planned_path(path_data)
+
+        assert adapter._get_planned_path() is None
+
+    def test_update_planned_path_ignores_invalid(self, adapter):
+        """유효하지 않은 path 데이터는 무시한다."""
+        adapter.update_planned_path({})
+        assert adapter._get_planned_path() is None
+
+        adapter.update_planned_path({'path': 'not_a_list'})
+        assert adapter._get_planned_path() is None
+
+        adapter.update_planned_path({'path': []})
+        assert adapter._get_planned_path() is None
+
+    def test_navigate_uses_planned_path(
+        self, adapter_with_handle, mock_api
+    ):
+        """Planned path가 있으면 compute_path 대신 사용한다."""
+        adapter_with_handle.position = [0.0, 0.0, 0.0]
+
+        # Set planned path
+        path_data = {
+            'robot_name': 'AGV-001',
+            'path': ['wp1', 'wp4', 'wp3', 'wp2'],
+        }
+        adapter_with_handle.update_planned_path(path_data)
+
+        dest = MagicMock()
+        dest.name = 'wp2'
+        dest.final_name = 'wp2'
+        dest.position = [5.0, 0.0, 0.0]
+        dest.map = 'map1'
+        execution = MagicMock()
+
+        adapter_with_handle.navigate(dest, execution)
+        adapter_with_handle.cancel_cmd_attempt()
+
+        call_args = mock_api.navigate.call_args[0]
+        nodes = call_args[2]
+        node_ids = [n.node_id for n in nodes]
+
+        # Should follow planned path wp1→wp4→wp3→wp2
+        assert node_ids == ['wp1', 'wp4', 'wp3', 'wp2']
+
+    def test_navigate_fallback_without_planned_path(
+        self, adapter_with_handle, mock_api
+    ):
+        """Planned path가 없으면 기존 compute_path를 사용한다."""
+        adapter_with_handle.position = [0.0, 0.0, 0.0]
+
+        dest = MagicMock()
+        dest.name = 'wp2'
+        dest.final_name = 'wp2'
+        dest.position = [5.0, 0.0, 0.0]
+        dest.map = 'map1'
+        execution = MagicMock()
+
+        adapter_with_handle.navigate(dest, execution)
+        adapter_with_handle.cancel_cmd_attempt()
+
+        # Should still call api.navigate successfully (fallback path)
+        mock_api.navigate.assert_called_once()
+
+    def test_planned_path_thread_safety(self, adapter):
+        """동시 update/get에서 예외가 발생하지 않는다."""
+        import concurrent.futures
+
+        def updater():
+            for _ in range(100):
+                adapter.update_planned_path({
+                    'path': ['wp1', 'wp2', 'wp3'],
+                })
+
+        def getter():
+            for _ in range(100):
+                adapter._get_planned_path()
+
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=4
+        ) as executor:
+            futures = []
+            for _ in range(2):
+                futures.append(executor.submit(updater))
+                futures.append(executor.submit(getter))
+            for f in futures:
+                f.result()  # Should not raise
+
+    def test_reset_order_clears_planned_path(
+        self, adapter_with_handle, mock_api
+    ):
+        """_reset_order_state가 planned path 캐시를 초기화한다."""
+        adapter_with_handle.update_planned_path({
+            'path': ['wp1', 'wp2'],
+        })
+        assert adapter_with_handle._get_planned_path() is not None
+
+        adapter_with_handle._reset_order_state()
+
+        assert adapter_with_handle._get_planned_path() is None
+
+    def test_navigate_planned_path_bridge(
+        self, adapter_with_handle, mock_api
+    ):
+        """start_node이 planned path에 없으면 bridge로 연결한다."""
+        adapter_with_handle.position = [0.0, 5.0, 0.0]  # near wp4
+
+        path_data = {
+            'robot_name': 'AGV-001',
+            'path': ['wp2', 'wp3'],
+        }
+        adapter_with_handle.update_planned_path(path_data)
+
+        dest = MagicMock()
+        dest.name = 'wp3'
+        dest.final_name = 'wp3'
+        dest.position = [5.0, 5.0, 0.0]
+        dest.map = 'map1'
+        execution = MagicMock()
+
+        adapter_with_handle.navigate(dest, execution)
+        adapter_with_handle.cancel_cmd_attempt()
+
+        call_args = mock_api.navigate.call_args[0]
+        nodes = call_args[2]
+        node_ids = [n.node_id for n in nodes]
+
+        # wp4 is start, bridge to wp2 then follow planned path
+        # bridge: wp4→wp3→wp2, then planned: wp2→wp3
+        # combined: wp4→wp3→wp2→wp3
+        assert node_ids[0] == 'wp4'
+        assert 'wp2' in node_ids
+        assert 'wp3' in node_ids

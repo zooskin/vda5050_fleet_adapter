@@ -82,6 +82,10 @@ class RobotAdapter:
         # 경로 캐시
         self._last_nodes: list[list] = []
 
+        # RMF planned path cache (ROS topic 구독으로 업데이트)
+        self._planned_path_lock = threading.Lock()
+        self._rmf_planned_path: list[str] | None = None
+
     def update(self, state: Any, data: RobotUpdateData) -> None:
         """주기적 상태 업데이트.
 
@@ -239,28 +243,51 @@ class RobotAdapter:
         if start_node is None:
             start_node = goal_node
 
-        # 경로 계산: current → goal_node → final_destination
-        # RMF가 goal_node를 경유지로 지정한 경우 (negotiation, 교통 관리 등)
-        # 반드시 goal_node를 거쳐야 한다. 최단 경로로 바로 가면 안 된다.
+        # RMF planned path 사용 (topic 수신), 없으면 fallback
         target = self._final_destination or goal_node
-        if goal_node != target and goal_node != start_node:
-            path_to_goal = compute_path(
-                self.nav_graph, start_node, goal_node
-            )
-            path_from_goal = compute_path(
-                self.nav_graph, goal_node, target
-            )
-            if path_to_goal and path_from_goal:
-                # goal_node 중복 제거하여 연결
-                path = path_to_goal + path_from_goal[1:]
-            elif path_to_goal:
-                path = path_to_goal
-            else:
-                path = compute_path(
-                    self.nav_graph, start_node, target
+        rmf_path = self._get_planned_path()
+
+        if rmf_path is not None:
+            # RMF 경로에서 현재 위치부터 잘라 사용
+            if start_node in rmf_path:
+                start_idx = rmf_path.index(start_node)
+                path = rmf_path[start_idx:]
+            elif rmf_path:
+                bridge = compute_path(
+                    self.nav_graph, start_node, rmf_path[0]
                 )
+                if bridge:
+                    path = bridge[:-1] + rmf_path
+                else:
+                    path = rmf_path
+            else:
+                path = None
+            logger.info(
+                'Using RMF planned path for %s: %s',
+                self.name, path,
+            )
         else:
-            path = compute_path(self.nav_graph, start_node, target)
+            logger.info(
+                'No RMF planned path for %s, fallback to compute_path',
+                self.name,
+            )
+            if goal_node != target and goal_node != start_node:
+                path_to_goal = compute_path(
+                    self.nav_graph, start_node, goal_node
+                )
+                path_from_goal = compute_path(
+                    self.nav_graph, goal_node, target
+                )
+                if path_to_goal and path_from_goal:
+                    path = path_to_goal + path_from_goal[1:]
+                elif path_to_goal:
+                    path = path_to_goal
+                else:
+                    path = compute_path(
+                        self.nav_graph, start_node, target
+                    )
+            else:
+                path = compute_path(self.nav_graph, start_node, target)
 
         if path is None:
             path = [start_node, target]
@@ -488,6 +515,9 @@ class RobotAdapter:
                 args=(self.name, self.cmd_id),
             )
 
+        with self._planned_path_lock:
+            self._rmf_planned_path = None
+
         old_task_id = self._current_task_id
         self._active_order_id = None
         self._order_update_id = 0
@@ -507,3 +537,28 @@ class RobotAdapter:
                 self._issue_cmd_thread.join(timeout=5.0)
             self._issue_cmd_thread = None
         self._cancel_cmd_event.clear()
+
+    def update_planned_path(self, path_data: dict) -> None:
+        """ROS topic에서 수신한 RMF planned path를 캐시한다."""
+        path = path_data.get('path')
+        if not path or not isinstance(path, list):
+            return
+        with self._planned_path_lock:
+            self._rmf_planned_path = list(path)
+        logger.info(
+            'Planned path updated for %s: %s', self.name, path,
+        )
+
+    def _get_planned_path(self) -> list[str] | None:
+        """캐시된 planned path를 조회한다. 유효하지 않으면 None."""
+        with self._planned_path_lock:
+            if self._rmf_planned_path is None:
+                return None
+            for wp_name in self._rmf_planned_path:
+                if wp_name not in self.nav_nodes:
+                    logger.warning(
+                        'Planned path has unknown node %s for %s',
+                        wp_name, self.name,
+                    )
+                    return None
+            return list(self._rmf_planned_path)
