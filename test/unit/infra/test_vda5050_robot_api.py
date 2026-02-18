@@ -100,6 +100,55 @@ class TestNavigate:
         api.navigate('AGV-001', 42, nodes, [], 'map1')
         assert 42 in api._cmd_order_map.get('AGV-001', {})
 
+    def test_navigate_uses_provided_order_id(self, api, mock_mqtt):
+        """제공된 order_id를 사용한다."""
+        nodes = [
+            Node(
+                node_id='wp1', sequence_id=0, released=True,
+                node_position=NodePosition(x=0.0, y=0.0, map_id='map1'),
+            ),
+        ]
+        result = api.navigate(
+            'AGV-001', 1, nodes, [], 'map1',
+            order_id='custom_order_123',
+        )
+
+        assert result == RobotAPIResult.SUCCESS
+        payload = mock_mqtt.publish.call_args[0][1]
+        data = json.loads(payload)
+        assert data['orderId'] == 'custom_order_123'
+
+    def test_navigate_auto_generates_order_id_when_empty(self, api, mock_mqtt):
+        """order_id가 빈 문자열이면 자동 생성한다."""
+        nodes = [
+            Node(
+                node_id='wp1', sequence_id=0, released=True,
+                node_position=NodePosition(x=0.0, y=0.0, map_id='map1'),
+            ),
+        ]
+        api.navigate('AGV-001', 5, nodes, [], 'map1', order_id='')
+
+        payload = mock_mqtt.publish.call_args[0][1]
+        data = json.loads(payload)
+        assert data['orderId'].startswith('order_5_')
+
+    def test_navigate_uses_provided_order_update_id(self, api, mock_mqtt):
+        """order_update_id가 payload에 반영된다."""
+        nodes = [
+            Node(
+                node_id='wp1', sequence_id=0, released=True,
+                node_position=NodePosition(x=0.0, y=0.0, map_id='map1'),
+            ),
+        ]
+        api.navigate(
+            'AGV-001', 1, nodes, [], 'map1',
+            order_id='order_1_abc', order_update_id=3,
+        )
+
+        payload = mock_mqtt.publish.call_args[0][1]
+        data = json.loads(payload)
+        assert data['orderUpdateId'] == 3
+
 
 class TestStop:
     """stop() 테스트."""
@@ -121,6 +170,36 @@ class TestStop:
         mock_mqtt.is_connected = False
         result = api.stop('AGV-001', 1)
         assert result == RobotAPIResult.RETRY
+
+
+class TestPause:
+    """pause() 테스트."""
+
+    def test_pause_publishes_start_pause(self, api, mock_mqtt):
+        """pause가 startPause instant action을 발행한다."""
+        result = api.pause('AGV-001', 1)
+
+        assert result == RobotAPIResult.SUCCESS
+        mock_mqtt.publish.assert_called_once()
+        topic = mock_mqtt.publish.call_args[0][0]
+        assert topic == 'uagv/v2/TestCo/AGV-001/instantActions'
+        payload = mock_mqtt.publish.call_args[0][1]
+        data = json.loads(payload)
+        assert data['actions'][0]['actionType'] == 'startPause'
+
+    def test_pause_retries_when_disconnected(self, api, mock_mqtt):
+        """MQTT 미연결 시 RETRY를 반환한다."""
+        mock_mqtt.is_connected = False
+        result = api.pause('AGV-001', 1)
+        assert result == RobotAPIResult.RETRY
+
+    def test_pause_action_has_hard_blocking(self, api, mock_mqtt):
+        """Start-pause action이 HARD blocking type이다."""
+        api.pause('AGV-001', 1)
+
+        payload = mock_mqtt.publish.call_args[0][1]
+        data = json.loads(payload)
+        assert data['actions'][0]['blockingType'] == 'HARD'
 
 
 class TestStartActivity:
@@ -202,19 +281,39 @@ class TestIsCommandCompleted:
 
         assert not api.is_command_completed('AGV-001', 1)
 
-    def test_order_not_completed_when_nodes_remain(self, api):
-        """남은 노드가 있으면 미완료."""
+    def test_order_not_completed_when_released_nodes_remain(self, api):
+        """Released(base) 노드가 남아있으면 미완료."""
         order_id = 'order_1_abc'
         api._cmd_order_map['AGV-001'] = {1: order_id}
 
+        released_node = MagicMock()
+        released_node.released = True
         state = MagicMock()
         state.order_id = order_id
-        state.node_states = [MagicMock()]
+        state.node_states = [released_node]
         state.driving = False
         state.action_states = []
         api._state_cache['AGV-001'] = state
 
         assert not api.is_command_completed('AGV-001', 1)
+
+    def test_order_completed_with_only_horizon_nodes(self, api):
+        """Horizon 노드만 남고 driving=False이면 완료."""
+        order_id = 'order_1_abc'
+        api._cmd_order_map['AGV-001'] = {1: order_id}
+
+        horizon_node1 = MagicMock()
+        horizon_node1.released = False
+        horizon_node2 = MagicMock()
+        horizon_node2.released = False
+        state = MagicMock()
+        state.order_id = order_id
+        state.node_states = [horizon_node1, horizon_node2]
+        state.driving = False
+        state.action_states = []
+        api._state_cache['AGV-001'] = state
+
+        assert api.is_command_completed('AGV-001', 1)
 
     def test_action_completed_when_finished(self, api):
         """Action status가 FINISHED이면 완료."""

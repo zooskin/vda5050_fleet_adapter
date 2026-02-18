@@ -52,6 +52,10 @@ class RobotAPI(ABC):
         nodes: list,
         edges: list,
         map_name: str,
+        order_id: str = '',
+        order_update_id: int = 0,
+        *,
+        track_action_id: str | None = None,
     ) -> RobotAPIResult:
         """VDA5050 Order를 전송하여 내비게이션을 시작한다.
 
@@ -61,6 +65,10 @@ class RobotAPI(ABC):
             nodes: VDA5050 Node 목록.
             edges: VDA5050 Edge 목록.
             map_name: 대상 맵 이름.
+            order_id: 외부 지정 Order ID (빈 문자열이면 자동 생성).
+            order_update_id: Order update 카운터.
+            track_action_id: nodeAction의 action_id. 제공 시 완료 추적에
+                order_id 대신 action_id를 사용한다.
 
         Returns:
             명령 결과.
@@ -69,6 +77,20 @@ class RobotAPI(ABC):
     @abstractmethod
     def stop(self, robot_name: str, cmd_id: int) -> RobotAPIResult:
         """Cancel order instant action을 전송한다.
+
+        Args:
+            robot_name: 로봇 이름.
+            cmd_id: 명령 ID.
+
+        Returns:
+            명령 결과.
+        """
+
+    @abstractmethod
+    def pause(self, robot_name: str, cmd_id: int) -> RobotAPIResult:
+        """Start-pause instant action을 전송한다.
+
+        Negotiation 발생 시 로봇을 일시정지시키기 위해 사용한다.
 
         Args:
             robot_name: 로봇 이름.

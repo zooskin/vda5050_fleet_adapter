@@ -41,7 +41,7 @@ class TestParseNavGraph:
         with open(path, 'w') as f:
             yaml.dump(nav_data, f)
 
-        nodes, edges = parse_nav_graph(str(path))
+        nodes, edges, index_to_name = parse_nav_graph(str(path))
 
         assert len(nodes) == 3
         assert 'wp1' in nodes
@@ -51,6 +51,8 @@ class TestParseNavGraph:
         assert nodes['wp2']['x'] == 5.0
         # lane 1개당 edge 1개 (이미 방향별 분리)
         assert len(edges) == 4
+        # index_to_name 매핑 검증
+        assert index_to_name == ['wp1', 'wp2', 'wp3']
 
     def test_parse_unnamed_vertices(self, tmp_path):
         """이름 없는 정점은 node0, node1 등으로 생성된다."""
@@ -69,7 +71,7 @@ class TestParseNavGraph:
         with open(path, 'w') as f:
             yaml.dump(nav_data, f)
 
-        nodes, edges = parse_nav_graph(str(path))
+        nodes, edges, _ = parse_nav_graph(str(path))
 
         assert 'node0' in nodes
         assert 'node1' in nodes
@@ -95,7 +97,7 @@ class TestParseNavGraph:
         with open(path, 'w') as f:
             yaml.dump(nav_data, f)
 
-        nodes, edges = parse_nav_graph(str(path))
+        nodes, edges, _ = parse_nav_graph(str(path))
 
         assert len(nodes) == 3
         assert 'wp1' in nodes
@@ -218,13 +220,57 @@ class TestBuildVda5050NodesEdges:
         assert pos.map_id == 'map1'
 
     def test_all_nodes_released(self, sample_nav_nodes):
-        """모든 노드가 released=True이다."""
-        vda_nodes, _ = build_vda5050_nodes_edges(
+        """base_end_index 미지정 시 모든 노드가 released=True이다."""
+        vda_nodes, vda_edges = build_vda5050_nodes_edges(
             ['wp1', 'wp2', 'wp3'], sample_nav_nodes, 'map1'
         )
 
         for node in vda_nodes:
             assert node.released is True
+        for edge in vda_edges:
+            assert edge.released is True
+
+    def test_base_horizon_split(self, sample_nav_nodes):
+        """base_end_index로 Base/Horizon이 올바르게 분리된다."""
+        vda_nodes, vda_edges = build_vda5050_nodes_edges(
+            ['wp1', 'wp2', 'wp3', 'wp4'], sample_nav_nodes, 'map1',
+            base_end_index=1,
+        )
+
+        # 노드: index 0,1 → Base, index 2,3 → Horizon
+        assert vda_nodes[0].released is True   # wp1 (index 0)
+        assert vda_nodes[1].released is True   # wp2 (index 1)
+        assert vda_nodes[2].released is False  # wp3 (index 2)
+        assert vda_nodes[3].released is False  # wp4 (index 3)
+
+        # 엣지: index 0 → Base (0 < 1), index 1,2 → Horizon
+        assert vda_edges[0].released is True   # wp1→wp2 (i=0)
+        assert vda_edges[1].released is False  # wp2→wp3 (i=1)
+        assert vda_edges[2].released is False  # wp3→wp4 (i=2)
+
+    def test_base_end_index_none_defaults_all_base(self, sample_nav_nodes):
+        """base_end_index=None이면 전부 Base이다 (기존 동작 보장)."""
+        vda_nodes, vda_edges = build_vda5050_nodes_edges(
+            ['wp1', 'wp2', 'wp3'], sample_nav_nodes, 'map1',
+            base_end_index=None,
+        )
+
+        for node in vda_nodes:
+            assert node.released is True
+        for edge in vda_edges:
+            assert edge.released is True
+
+    def test_base_end_index_at_last_node(self, sample_nav_nodes):
+        """base_end_index가 마지막 노드이면 전부 Base이다."""
+        vda_nodes, vda_edges = build_vda5050_nodes_edges(
+            ['wp1', 'wp2', 'wp3'], sample_nav_nodes, 'map1',
+            base_end_index=2,
+        )
+
+        for node in vda_nodes:
+            assert node.released is True
+        for edge in vda_edges:
+            assert edge.released is True
 
     def test_seq_start_offset(self, sample_nav_nodes):
         """시작 시퀀스 오프셋이 적용된다."""

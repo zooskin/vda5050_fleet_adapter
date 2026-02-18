@@ -8,6 +8,8 @@
   <license>Apache-2.0</license>
 
   <depend>rmf_fleet_adapter_python</depend>
+  <depend>rmf_fleet_msgs</depend>
+  <depend>rmf_task_msgs</depend>
   <depend>rclpy</depend>
   <depend>python3-paho-mqtt</depend>
   <depend>python3-yaml</depend>
