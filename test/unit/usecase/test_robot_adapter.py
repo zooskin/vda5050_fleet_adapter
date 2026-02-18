@@ -1638,3 +1638,177 @@ class TestSparsePathInterpolation:
         assert nodes[1].released is True   # n2 (dest)
         assert nodes[2].released is False  # n3
         assert nodes[6].released is False  # n7
+
+
+class TestPlannedPathCacheClearing:
+    """navigate 후 planned_path 캐시 초기화 테스트."""
+
+    def test_navigate_clears_planned_path_cache(
+        self, adapter_with_handle, mock_api
+    ):
+        """Navigate 호출 후 _get_planned_path()가 None을 반환한다."""
+        adapter_with_handle.position = [0.0, 0.0, 0.0]
+
+        # planned path 설정
+        adapter_with_handle.update_planned_path({
+            'robot_name': 'AGV-001',
+            'path': ['wp1', 'wp2', 'wp3'],
+        })
+        assert adapter_with_handle._get_planned_path() is not None
+
+        # navigate 호출
+        dest = MagicMock()
+        dest.name = 'wp2'
+        dest.final_name = 'wp3'
+        dest.position = [5.0, 0.0, 0.0]
+        dest.map = 'map1'
+        adapter_with_handle.navigate(dest, MagicMock())
+        adapter_with_handle.cancel_cmd_attempt()
+
+        # 캐시가 초기화되어 None 반환
+        assert adapter_with_handle._get_planned_path() is None
+
+    def test_stale_planned_path_not_reused(
+        self, adapter_with_handle, mock_api
+    ):
+        """두 번째 navigate에서 stale planned_path가 재사용되지 않는다."""
+        adapter_with_handle.position = [0.0, 0.0, 0.0]
+
+        # 첫 navigate: planned_path 사용
+        adapter_with_handle.update_planned_path({
+            'robot_name': 'AGV-001',
+            'path': ['wp1', 'wp4', 'wp3', 'wp2'],
+        })
+        dest1 = MagicMock()
+        dest1.name = 'wp2'
+        dest1.final_name = 'wp2'
+        dest1.position = [5.0, 0.0, 0.0]
+        dest1.map = 'map1'
+        adapter_with_handle.navigate(dest1, MagicMock())
+        adapter_with_handle.cancel_cmd_attempt()
+
+        # 두 번째 navigate: planned_path 없이 (캐시가 소비됨)
+        adapter_with_handle.position = [5.0, 0.0, 0.0]  # at wp2
+        dest2 = MagicMock()
+        dest2.name = 'wp3'
+        dest2.final_name = 'wp3'
+        dest2.position = [5.0, 5.0, 0.0]
+        dest2.map = 'map1'
+        adapter_with_handle.navigate(dest2, MagicMock())
+        adapter_with_handle.cancel_cmd_attempt()
+
+        second_call_nodes = [
+            n.node_id
+            for n in mock_api.navigate.call_args[0][2]
+        ]
+
+        # 첫 번째 경로의 stale 노드(wp4 역방향)가 포함되지 않아야 함
+        # 두 번째는 compute_path fallback: wp2→wp3
+        assert second_call_nodes == ['wp2', 'wp3']
+
+
+class TestStitchingSequenceId:
+    """Order update 시 sequenceId stitching 테스트."""
+
+    def test_first_order_seq_starts_at_zero(
+        self, adapter_with_handle, mock_api
+    ):
+        """첫 번째 order의 sequenceId가 0부터 시작한다."""
+        adapter_with_handle.position = [0.0, 0.0, 0.0]
+
+        dest = MagicMock()
+        dest.name = 'wp2'
+        dest.final_name = 'wp3'
+        dest.position = [5.0, 0.0, 0.0]
+        dest.map = 'map1'
+        adapter_with_handle.navigate(dest, MagicMock())
+        adapter_with_handle.cancel_cmd_attempt()
+
+        nodes = mock_api.navigate.call_args[0][2]
+        assert nodes[0].sequence_id == 0
+
+    def test_order_update_seq_continues_from_stitch(
+        self, adapter_with_handle, mock_api
+    ):
+        """Order update 시 stitching node의 sequenceId가 유지된다."""
+        adapter_with_handle.position = [0.0, 0.0, 0.0]
+
+        # 첫 navigate: wp1→wp2→wp3, dest=wp2 (base_end_index=1)
+        dest1 = MagicMock()
+        dest1.name = 'wp2'
+        dest1.final_name = 'wp3'
+        dest1.position = [5.0, 0.0, 0.0]
+        dest1.map = 'map1'
+        adapter_with_handle.navigate(dest1, MagicMock())
+        adapter_with_handle.cancel_cmd_attempt()
+
+        first_nodes = mock_api.navigate.call_args[0][2]
+        first_node_ids = [n.node_id for n in first_nodes]
+
+        # wp2의 sequenceId 확인 (stitching point)
+        wp2_idx = first_node_ids.index('wp2')
+        stitch_seq = first_nodes[wp2_idx].sequence_id
+
+        # 두 번째 navigate (order update): wp2→wp3
+        adapter_with_handle.position = [5.0, 0.0, 0.0]
+        adapter_with_handle.update_planned_path({
+            'robot_name': 'AGV-001',
+            'path': ['wp2', 'wp3'],
+        })
+        dest2 = MagicMock()
+        dest2.name = 'wp3'
+        dest2.final_name = 'wp3'
+        dest2.position = [5.0, 5.0, 0.0]
+        dest2.map = 'map1'
+        adapter_with_handle.navigate(dest2, MagicMock())
+        adapter_with_handle.cancel_cmd_attempt()
+
+        second_nodes = mock_api.navigate.call_args[0][2]
+        # stitching node (첫 노드)의 sequenceId == 이전 Base 마지막 노드
+        assert second_nodes[0].sequence_id == stitch_seq
+
+    def test_new_order_resets_seq_to_zero(
+        self, adapter_with_handle, mock_api
+    ):
+        """Negotiation 후 새 order는 sequenceId 0부터 시작한다."""
+        adapter_with_handle.position = [0.0, 0.0, 0.0]
+
+        # 첫 navigate
+        dest1 = MagicMock()
+        dest1.name = 'wp2'
+        dest1.final_name = 'wp3'
+        dest1.position = [5.0, 0.0, 0.0]
+        dest1.map = 'map1'
+        exec1 = MagicMock()
+        adapter_with_handle.navigate(dest1, exec1)
+        adapter_with_handle.cancel_cmd_attempt()
+
+        # stop → negotiation pause
+        activity = MagicMock()
+        exec1.identifier.is_same.return_value = True
+        adapter_with_handle.stop(activity)
+
+        # navigate → cancel + new order (새 orderID)
+        dest2 = MagicMock()
+        dest2.name = 'wp3'
+        dest2.final_name = 'wp3'
+        dest2.position = [5.0, 5.0, 0.0]
+        dest2.map = 'map1'
+        adapter_with_handle.navigate(dest2, MagicMock())
+        # 스레드 완료 대기
+        if adapter_with_handle._issue_cmd_thread is not None:
+            adapter_with_handle._issue_cmd_thread.join(timeout=5.0)
+
+        # 새 order의 sequenceId는 0부터
+        nodes = mock_api.navigate.call_args[0][2]
+        assert nodes[0].sequence_id == 0
+
+    def test_reset_order_clears_stitch_seq(
+        self, adapter_with_handle, mock_api
+    ):
+        """_reset_order_state가 _last_stitch_seq_id를 초기화한다."""
+        adapter_with_handle._last_stitch_seq_id = 42
+
+        adapter_with_handle._reset_order_state()
+
+        assert adapter_with_handle._last_stitch_seq_id == 0

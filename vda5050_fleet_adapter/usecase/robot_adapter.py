@@ -81,6 +81,7 @@ class RobotAdapter:
 
         # 경로 캐시
         self._last_nodes: list[list] = []
+        self._last_stitch_seq_id: int = 0  # 마지막 Base 노드의 sequenceId
 
         # RMF planned path cache (ROS topic 구독으로 업데이트)
         self._planned_path_lock = threading.Lock()
@@ -258,6 +259,11 @@ class RobotAdapter:
                     self.name,
                 )
 
+        # 사용 후 캐시 초기화: stale planned_path가 다음 navigate에
+        # 재사용되어 역방향 bridge가 생성되는 것을 방지한다.
+        with self._planned_path_lock:
+            self._rmf_planned_path = None
+
         if rmf_path is not None:
             # RMF planned path는 sparse할 수 있다 (중간 노드 생략).
             # 인접하지 않은 노드 쌍 사이를 compute_path로 보간한다.
@@ -343,11 +349,23 @@ class RobotAdapter:
         )
 
         # ── Step 3: VDA5050 Node/Edge 생성 ──
+        # Order update 시 stitching node의 sequenceId를 유지한다.
+        seq_start = (
+            self._last_stitch_seq_id
+            if self._order_update_id > 0
+            else 0
+        )
+
         map_name = destination.map
         vda_nodes, vda_edges = build_vda5050_nodes_edges(
             path, self.nav_nodes, map_name,
             base_end_index=base_end_index,
+            seq_start=seq_start,
         )
+
+        # 다음 order update를 위해 stitching sequenceId 저장
+        # stitching node = 현재 Base의 마지막 노드
+        self._last_stitch_seq_id = seq_start + base_end_index * 2
 
         # 경로 캐시 업데이트
         self._last_nodes = [
@@ -569,6 +587,7 @@ class RobotAdapter:
         self._final_destination = None
         self._current_task_id = None
         self._last_nodes = []
+        self._last_stitch_seq_id = 0
         logger.info(
             'Order state reset for robot %s (task_id=%s)',
             self.name, old_task_id,
