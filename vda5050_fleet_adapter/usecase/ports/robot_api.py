@@ -162,6 +162,19 @@ class RobotAPI(ABC):
         """
 
     @abstractmethod
+    def is_robot_connected(self, robot_name: str) -> bool:
+        """로봇의 연결 상태가 ONLINE인지 확인한다.
+
+        연결 상태를 수신한 적이 없으면 True(연결 가정)를 반환한다.
+
+        Args:
+            robot_name: 로봇 이름.
+
+        Returns:
+            ONLINE이거나 상태 미수신이면 True, 그 외 False.
+        """
+
+    @abstractmethod
     def is_command_completed(
         self, robot_name: str, cmd_id: int
     ) -> bool:
