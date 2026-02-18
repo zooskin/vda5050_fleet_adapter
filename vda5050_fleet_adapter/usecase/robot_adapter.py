@@ -89,6 +89,7 @@ class RobotAdapter:
         # 경로 캐시
         self._last_nodes: list[list] = []
         self._last_stitch_seq_id: int = 0  # 마지막 Base 노드의 sequenceId
+        self._last_map: str | None = None  # 마지막 navigate의 맵 이름
 
     def update(self, state: Any, data: RobotUpdateData) -> None:
         """주기적 상태 업데이트.
@@ -373,6 +374,7 @@ class RobotAdapter:
         )
 
         map_name = destination.map
+        self._last_map = map_name
         vda_nodes, vda_edges = build_vda5050_nodes_edges(
             path, self.nav_nodes, map_name,
             base_end_index=base_end_index,
@@ -469,8 +471,11 @@ class RobotAdapter:
     ) -> None:
         """RMF 액션 실행 콜백.
 
+        Active order가 있으면 VDA5050 nodeAction으로 order update를 전송한다.
+        Active order가 없으면 기존 instantAction 방식을 사용한다.
+
         Args:
-            category: 액션 카테고리 (teleop, charge 등).
+            category: 액션 카테고리 (pick, drop, charge 등).
             description: 액션 설명 dict.
             execution: RMF execution handle.
         """
@@ -479,15 +484,119 @@ class RobotAdapter:
         self._is_navigating = False
 
         logger.info(
-            'Execute action [%s]: category=%s, cmd_id=%d',
+            'Execute action [%s]: category=%s, cmd_id=%d, '
+            'active_order=%s',
             self.name, category, self.cmd_id,
+            self._active_order_id,
         )
 
         params = description if isinstance(description, dict) else {}
 
+        if (
+            self._active_order_id is not None
+            and self.position is not None
+        ):
+            self._execute_action_as_order_update(category, params)
+        else:
+            self.attempt_cmd_until_success(
+                cmd=self.api.start_activity,
+                args=(self.name, self.cmd_id, category, params),
+            )
+
+    def _execute_action_as_order_update(
+        self, category: str, params: dict,
+    ) -> None:
+        """Active order에 nodeAction을 추가하는 order update를 전송한다.
+
+        현재 위치의 노드에 action을 HARD blocking으로 첨부하여
+        order update로 전송한다. 완료 추적은 action_id 기반.
+
+        Args:
+            category: 액션 종류 (e.g. 'pick', 'drop').
+            params: 액션 파라미터 dict.
+        """
+        from vda5050_fleet_adapter.domain.entities.action import (
+            Action, ActionParameter,
+        )
+        from vda5050_fleet_adapter.domain.enums import BlockingType
+
+        current_node = find_nearest_node(
+            self.nav_nodes, self.position[0], self.position[1]
+        )
+        if current_node is None:
+            logger.error(
+                'No nearest node for action, robot %s', self.name,
+            )
+            return
+
+        action_id = (
+            f'{category}_{self.cmd_id}_{uuid.uuid4().hex[:8]}'
+        )
+        action_params = [
+            ActionParameter(key=k, value=v)
+            for k, v in params.items()
+        ]
+        action = Action(
+            action_type=category,
+            action_id=action_id,
+            blocking_type=BlockingType.HARD,
+            action_parameters=action_params,
+        )
+
+        self._order_update_id += 1
+
+        # 경로 구성: 현재 노드 (Base) + 최종 목적지까지 Horizon
+        path = [current_node]
+        if (
+            self._final_destination
+            and self._final_destination != current_node
+        ):
+            extension = compute_path(
+                self.nav_graph, current_node,
+                self._final_destination,
+            )
+            if extension and len(extension) > 1:
+                path = path + extension[1:]
+
+        map_name = self._last_map or 'map1'
+        seq_start = self._last_stitch_seq_id
+
+        vda_nodes, vda_edges = build_vda5050_nodes_edges(
+            path, self.nav_nodes, map_name,
+            base_end_index=0,
+            seq_start=seq_start,
+        )
+
+        # Base 노드에 action 첨부
+        vda_nodes[0].actions.append(action)
+
+        # Stitch seq 유지 (base_end_index=0 → seq_start + 0)
+        self._last_stitch_seq_id = seq_start
+
+        logger.info(
+            'Action as order update [%s]: category=%s, '
+            'action_id=%s, order_id=%s, update_id=%d, '
+            'node=%s, path=%s',
+            self.name, category, action_id,
+            self._active_order_id, self._order_update_id,
+            current_node, path,
+        )
+
+        nav_args = (
+            self.name,
+            self.cmd_id,
+            vda_nodes,
+            vda_edges,
+            map_name,
+            self._active_order_id,
+            self._order_update_id,
+        )
+
         self.attempt_cmd_until_success(
-            cmd=self.api.start_activity,
-            args=(self.name, self.cmd_id, category, params),
+            cmd=lambda *a: self.api.navigate(
+                *a, track_action_id=action_id
+            ),
+            args=nav_args,
         )
 
     def attempt_cmd_until_success(
@@ -604,6 +713,7 @@ class RobotAdapter:
         self._current_task_id = None
         self._last_nodes = []
         self._last_stitch_seq_id = 0
+        self._last_map = None
         logger.info(
             'Order state reset for robot %s (task_id=%s)',
             self.name, old_task_id,

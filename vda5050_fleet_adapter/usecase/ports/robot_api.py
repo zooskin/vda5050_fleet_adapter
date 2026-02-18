@@ -54,6 +54,8 @@ class RobotAPI(ABC):
         map_name: str,
         order_id: str = '',
         order_update_id: int = 0,
+        *,
+        track_action_id: str | None = None,
     ) -> RobotAPIResult:
         """VDA5050 Order를 전송하여 내비게이션을 시작한다.
 
@@ -65,6 +67,8 @@ class RobotAPI(ABC):
             map_name: 대상 맵 이름.
             order_id: 외부 지정 Order ID (빈 문자열이면 자동 생성).
             order_update_id: Order update 카운터.
+            track_action_id: nodeAction의 action_id. 제공 시 완료 추적에
+                order_id 대신 action_id를 사용한다.
 
         Returns:
             명령 결과.
