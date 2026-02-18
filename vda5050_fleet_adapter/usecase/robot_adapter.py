@@ -91,6 +91,9 @@ class RobotAdapter:
         self._last_stitch_seq_id: int = 0  # 마지막 Base 노드의 sequenceId
         self._last_map: str | None = None  # 마지막 navigate의 맵 이름
 
+        # Commission 상태 추적
+        self._last_commission: Any | None = None
+
     def update(self, state: Any, data: RobotUpdateData) -> None:
         """주기적 상태 업데이트.
 
@@ -143,6 +146,37 @@ class RobotAdapter:
 
         if self.update_handle is not None:
             self.update_handle.update(state, activity_identifier)
+            self._update_commission()
+
+    def _update_commission(self) -> None:
+        """VDA5050 상태 기반으로 RMF commission을 업데이트한다."""
+        commission_state = self.api.get_commission_state(self.name)
+        if commission_state is None:
+            return
+
+        if commission_state == self._last_commission:
+            return
+
+        commission = self.update_handle.commission()
+        commission.accept_dispatched_tasks = (
+            commission_state.accept_dispatched_tasks
+        )
+        commission.accept_direct_tasks = (
+            commission_state.accept_direct_tasks
+        )
+        commission.perform_idle_behavior = (
+            commission_state.perform_idle_behavior
+        )
+        self.update_handle.set_commission(commission)
+        self._last_commission = commission_state
+
+        logger.info(
+            'Commission updated [%s]: dispatch=%s, direct=%s, idle=%s',
+            self.name,
+            commission_state.accept_dispatched_tasks,
+            commission_state.accept_direct_tasks,
+            commission_state.perform_idle_behavior,
+        )
 
     def make_callbacks(self) -> Any:
         """RMF RobotCallbacks를 생성한다.

@@ -19,6 +19,23 @@ class RobotAPIResult(IntEnum):
     IMPOSSIBLE = 2
 
 
+@dataclass(frozen=True)
+class CommissionState:
+    """RMF Commission 상태.
+
+    VDA5050 상태 기반으로 계산된 RMF commission 설정.
+
+    Args:
+        accept_dispatched_tasks: dispatch 태스크 수락 여부.
+        accept_direct_tasks: direct 태스크 수락 여부.
+        perform_idle_behavior: idle 행동 수행 여부.
+    """
+
+    accept_dispatched_tasks: bool = True
+    accept_direct_tasks: bool = True
+    perform_idle_behavior: bool = True
+
+
 @dataclass
 class RobotUpdateData:
     """주기적 상태 업데이트 데이터.
@@ -129,6 +146,19 @@ class RobotAPI(ABC):
 
         Returns:
             상태 데이터 또는 아직 수신 전이면 None.
+        """
+
+    @abstractmethod
+    def get_commission_state(
+        self, robot_name: str
+    ) -> CommissionState | None:
+        """VDA5050 상태 기반 commission 상태를 반환한다.
+
+        Args:
+            robot_name: 로봇 이름.
+
+        Returns:
+            commission 상태 또는 상태 미수신 시 None.
         """
 
     @abstractmethod

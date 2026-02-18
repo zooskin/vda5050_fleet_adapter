@@ -10,12 +10,14 @@ from vda5050_fleet_adapter.usecase.ports.config_port import (
     ReferenceCoordinates,
 )
 from vda5050_fleet_adapter.usecase.ports.robot_api import (
+    CommissionState,
     RobotAPI,
     RobotAPIResult,
     RobotUpdateData,
 )
 
 __all__ = [
+    'CommissionState',
     'ConfigPort',
     'FleetManagerConfig',
     'MqttConfig',
