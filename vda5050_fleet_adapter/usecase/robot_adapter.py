@@ -90,11 +90,6 @@ class RobotAdapter:
         self._last_nodes: list[list] = []
         self._last_stitch_seq_id: int = 0  # 마지막 Base 노드의 sequenceId
 
-        # RMF planned path cache (ROS topic 구독으로 업데이트)
-        self._planned_path_lock = threading.Lock()
-        self._rmf_planned_path: list[str] | None = None
-        self._planned_path_event = threading.Event()
-
     def update(self, state: Any, data: RobotUpdateData) -> None:
         """주기적 상태 업데이트.
 
@@ -270,31 +265,26 @@ class RobotAdapter:
         if start_node is None:
             start_node = goal_node
 
-        # ── Step 1: RMF planned path 확보 ──
-        # planned_path 토픽은 DDS를 경유하므로 navigate() 콜백보다
-        # 늦게 도착할 수 있다. Event로 짧게 대기하여 수신을 보장한다.
+        # ── Step 1: destination에서 경로 추출 ──
         target = self._final_destination or goal_node
-        self._planned_path_event.clear()
-        rmf_path = self._get_planned_path()
-        if rmf_path is None:
-            if self._planned_path_event.wait(timeout=0.1):
-                rmf_path = self._get_planned_path()
-                logger.info(
-                    'Planned path arrived after wait for %s',
-                    self.name,
+        raw_waypoints = getattr(destination, 'waypoint_names', None)
+        rmf_path = None
+        if raw_waypoints and isinstance(
+            raw_waypoints, (list, tuple)
+        ):
+            valid = all(
+                wp in self.nav_nodes for wp in raw_waypoints
+            )
+            if valid:
+                rmf_path = list(raw_waypoints)
+            else:
+                logger.warning(
+                    'waypoint_names has unknown nodes for %s: %s',
+                    self.name, raw_waypoints,
                 )
 
-        # 사용 후 캐시 초기화: stale planned_path가 다음 navigate에
-        # 재사용되어 역방향 bridge가 생성되는 것을 방지한다.
-        with self._planned_path_lock:
-            self._rmf_planned_path = None
-
         if rmf_path is not None:
-            # RMF planned path는 sparse할 수 있다 (중간 노드 생략).
-            # 인접하지 않은 노드 쌍 사이를 compute_path로 보간한다.
             rmf_path = self._interpolate_path(rmf_path)
-
-            # RMF 경로에서 현재 위치부터 잘라 사용
             if start_node in rmf_path:
                 start_idx = rmf_path.index(start_node)
                 path = rmf_path[start_idx:]
@@ -309,12 +299,12 @@ class RobotAdapter:
             else:
                 path = None
             logger.info(
-                'Using RMF planned path for %s: %s',
+                'Using waypoint_names for %s: %s',
                 self.name, path,
             )
         else:
             logger.info(
-                'No RMF planned path for %s, '
+                'No waypoint_names for %s, '
                 'fallback to compute_path(start=%s, target=%s)',
                 self.name, start_node, target,
             )
@@ -607,10 +597,6 @@ class RobotAdapter:
         self._navigate_target_position = None
         self._is_navigating = False
 
-        with self._planned_path_lock:
-            self._rmf_planned_path = None
-        self._planned_path_event.clear()
-
         old_task_id = self._current_task_id
         self._active_order_id = None
         self._order_update_id = 0
@@ -631,32 +617,6 @@ class RobotAdapter:
                 self._issue_cmd_thread.join(timeout=5.0)
             self._issue_cmd_thread = None
         self._cancel_cmd_event.clear()
-
-    def update_planned_path(self, path_data: dict) -> None:
-        """ROS topic에서 수신한 RMF planned path를 캐시한다."""
-        path = path_data.get('path')
-        if not path or not isinstance(path, list):
-            return
-        with self._planned_path_lock:
-            self._rmf_planned_path = list(path)
-        self._planned_path_event.set()
-        logger.info(
-            'Planned path updated for %s: %s', self.name, path,
-        )
-
-    def _get_planned_path(self) -> list[str] | None:
-        """캐시된 planned path를 조회한다. 유효하지 않으면 None."""
-        with self._planned_path_lock:
-            if self._rmf_planned_path is None:
-                return None
-            for wp_name in self._rmf_planned_path:
-                if wp_name not in self.nav_nodes:
-                    logger.warning(
-                        'Planned path has unknown node %s for %s',
-                        wp_name, self.name,
-                    )
-                    return None
-            return list(self._rmf_planned_path)
 
     def _interpolate_path(self, sparse_path: list[str]) -> list[str]:
         """Sparse path의 인접하지 않은 노드 쌍 사이를 보간한다.
