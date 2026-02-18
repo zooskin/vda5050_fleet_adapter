@@ -1161,6 +1161,10 @@ class TestDetourPath:
     ):
         """경유지 D를 반드시 거치는 경로 생성 (A→B→D→B→C)."""
         detour_adapter.position = [0.0, 0.0, 0.0]
+        detour_adapter.update_planned_path({
+            'robot_name': 'AGV-001',
+            'path': ['A', 'B', 'D', 'B', 'C'],
+        })
 
         dest = MagicMock()
         dest.name = 'D'
@@ -1188,6 +1192,10 @@ class TestDetourPath:
     ):
         """경유지까지 Base, 이후 Horizon으로 분리."""
         detour_adapter.position = [0.0, 0.0, 0.0]
+        detour_adapter.update_planned_path({
+            'robot_name': 'AGV-001',
+            'path': ['A', 'B', 'D', 'B', 'C'],
+        })
 
         dest = MagicMock()
         dest.name = 'D'

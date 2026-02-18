@@ -314,15 +314,16 @@ class RobotAdapter:
             )
         else:
             logger.info(
-                'No RMF planned path for %s, fallback to compute_path',
-                self.name,
+                'No RMF planned path for %s, '
+                'fallback to compute_path(start=%s, target=%s)',
+                self.name, start_node, target,
             )
             path = compute_path(
-                self.nav_graph, start_node, goal_node
+                self.nav_graph, start_node, target
             )
 
         if path is None:
-            path = [start_node, goal_node]
+            path = [start_node, target]
 
         # ── Step 2: 3-tier 경로 구성 ──
         # tier 1 (Base):    path[0 : base_end_index+1]
