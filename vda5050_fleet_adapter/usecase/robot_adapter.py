@@ -8,6 +8,7 @@ RobotAPI를 통해 VDA5050 AGV에 명령을 전달한다.
 from __future__ import annotations
 
 import logging
+import math
 import threading
 from typing import Any
 import uuid
@@ -51,6 +52,7 @@ class RobotAdapter:
         nav_nodes: dict,
         nav_edges: dict,
         nav_graph: Any,
+        arrival_threshold: float = 0.5,
     ) -> None:
         self.name = name
         self.api = api
@@ -59,12 +61,17 @@ class RobotAdapter:
         self.nav_nodes = nav_nodes
         self.nav_edges = nav_edges
         self.nav_graph = nav_graph
+        self.arrival_threshold = arrival_threshold
 
         self.execution: Any | None = None
         self.update_handle: Any | None = None
         self.configuration: Any | None = None
         self.cmd_id: int = 0
         self.position: list[float] | None = None
+
+        # Navigate 도착 판정 상태
+        self._navigate_target_position: list[float] | None = None
+        self._is_navigating: bool = False
 
         # Order 라이프사이클 관리
         self._active_order_id: str | None = None
@@ -81,11 +88,8 @@ class RobotAdapter:
 
         # 경로 캐시
         self._last_nodes: list[list] = []
-
-        # RMF planned path cache (ROS topic 구독으로 업데이트)
-        self._planned_path_lock = threading.Lock()
-        self._rmf_planned_path: list[str] | None = None
-        self._planned_path_event = threading.Event()
+        self._last_stitch_seq_id: int = 0  # 마지막 Base 노드의 sequenceId
+        self._last_map: str | None = None  # 마지막 navigate의 맵 이름
 
     def update(self, state: Any, data: RobotUpdateData) -> None:
         """주기적 상태 업데이트.
@@ -101,9 +105,25 @@ class RobotAdapter:
         activity_identifier = None
 
         if self.execution is not None:
-            if self.api.is_command_completed(self.name, self.cmd_id):
+            completed = False
+            if self._is_navigating and self._navigate_target_position:
+                dist = math.hypot(
+                    data.position[0]
+                    - self._navigate_target_position[0],
+                    data.position[1]
+                    - self._navigate_target_position[1],
+                )
+                if dist <= self.arrival_threshold:
+                    completed = True
+            else:
+                completed = self.api.is_command_completed(
+                    self.name, self.cmd_id
+                )
+            if completed:
                 self.execution.finished()
                 self.execution = None
+                self._is_navigating = False
+                self._navigate_target_position = None
             else:
                 activity_identifier = self.execution.identifier
 
@@ -155,6 +175,8 @@ class RobotAdapter:
         """
         self.cmd_id += 1
         self.execution = execution
+        self._navigate_target_position = list(destination.position[:2])
+        self._is_navigating = True
         self.node.get_logger().info(
             f'[{self.name}] navigate callback called, '
             f'dest={destination.position}, map={destination.map}, '
@@ -244,26 +266,26 @@ class RobotAdapter:
         if start_node is None:
             start_node = goal_node
 
-        # ── Step 1: RMF planned path 확보 ──
-        # planned_path 토픽은 DDS를 경유하므로 navigate() 콜백보다
-        # 늦게 도착할 수 있다. Event로 짧게 대기하여 수신을 보장한다.
+        # ── Step 1: destination에서 경로 추출 ──
         target = self._final_destination or goal_node
-        self._planned_path_event.clear()
-        rmf_path = self._get_planned_path()
-        if rmf_path is None:
-            if self._planned_path_event.wait(timeout=0.1):
-                rmf_path = self._get_planned_path()
-                logger.info(
-                    'Planned path arrived after wait for %s',
-                    self.name,
+        raw_waypoints = getattr(destination, 'waypoint_names', None)
+        rmf_path = None
+        if raw_waypoints and isinstance(
+            raw_waypoints, (list, tuple)
+        ):
+            valid = all(
+                wp in self.nav_nodes for wp in raw_waypoints
+            )
+            if valid:
+                rmf_path = list(raw_waypoints)
+            else:
+                logger.warning(
+                    'waypoint_names has unknown nodes for %s: %s',
+                    self.name, raw_waypoints,
                 )
 
         if rmf_path is not None:
-            # RMF planned path는 sparse할 수 있다 (중간 노드 생략).
-            # 인접하지 않은 노드 쌍 사이를 compute_path로 보간한다.
             rmf_path = self._interpolate_path(rmf_path)
-
-            # RMF 경로에서 현재 위치부터 잘라 사용
             if start_node in rmf_path:
                 start_idx = rmf_path.index(start_node)
                 path = rmf_path[start_idx:]
@@ -278,20 +300,21 @@ class RobotAdapter:
             else:
                 path = None
             logger.info(
-                'Using RMF planned path for %s: %s',
+                'Using waypoint_names for %s: %s',
                 self.name, path,
             )
         else:
             logger.info(
-                'No RMF planned path for %s, fallback to compute_path',
-                self.name,
+                'No waypoint_names for %s, '
+                'fallback to compute_path(start=%s, target=%s)',
+                self.name, start_node, target,
             )
             path = compute_path(
-                self.nav_graph, start_node, goal_node
+                self.nav_graph, start_node, target
             )
 
         if path is None:
-            path = [start_node, goal_node]
+            path = [start_node, target]
 
         # ── Step 2: 3-tier 경로 구성 ──
         # tier 1 (Base):    path[0 : base_end_index+1]
@@ -343,11 +366,24 @@ class RobotAdapter:
         )
 
         # ── Step 3: VDA5050 Node/Edge 생성 ──
+        # Order update 시 stitching node의 sequenceId를 유지한다.
+        seq_start = (
+            self._last_stitch_seq_id
+            if self._order_update_id > 0
+            else 0
+        )
+
         map_name = destination.map
+        self._last_map = map_name
         vda_nodes, vda_edges = build_vda5050_nodes_edges(
             path, self.nav_nodes, map_name,
             base_end_index=base_end_index,
+            seq_start=seq_start,
         )
+
+        # 다음 order update를 위해 stitching sequenceId 저장
+        # stitching node = 현재 Base의 마지막 노드
+        self._last_stitch_seq_id = seq_start + base_end_index * 2
 
         # 경로 캐시 업데이트
         self._last_nodes = [
@@ -435,24 +471,132 @@ class RobotAdapter:
     ) -> None:
         """RMF 액션 실행 콜백.
 
+        Active order가 있으면 VDA5050 nodeAction으로 order update를 전송한다.
+        Active order가 없으면 기존 instantAction 방식을 사용한다.
+
         Args:
-            category: 액션 카테고리 (teleop, charge 등).
+            category: 액션 카테고리 (pick, drop, charge 등).
             description: 액션 설명 dict.
             execution: RMF execution handle.
         """
         self.cmd_id += 1
         self.execution = execution
+        self._is_navigating = False
 
         logger.info(
-            'Execute action [%s]: category=%s, cmd_id=%d',
+            'Execute action [%s]: category=%s, cmd_id=%d, '
+            'active_order=%s',
             self.name, category, self.cmd_id,
+            self._active_order_id,
         )
 
         params = description if isinstance(description, dict) else {}
 
+        if (
+            self._active_order_id is not None
+            and self.position is not None
+        ):
+            self._execute_action_as_order_update(category, params)
+        else:
+            self.attempt_cmd_until_success(
+                cmd=self.api.start_activity,
+                args=(self.name, self.cmd_id, category, params),
+            )
+
+    def _execute_action_as_order_update(
+        self, category: str, params: dict,
+    ) -> None:
+        """Active order에 nodeAction을 추가하는 order update를 전송한다.
+
+        현재 위치의 노드에 action을 HARD blocking으로 첨부하여
+        order update로 전송한다. 완료 추적은 action_id 기반.
+
+        Args:
+            category: 액션 종류 (e.g. 'pick', 'drop').
+            params: 액션 파라미터 dict.
+        """
+        from vda5050_fleet_adapter.domain.entities.action import (
+            Action, ActionParameter,
+        )
+        from vda5050_fleet_adapter.domain.enums import BlockingType
+
+        current_node = find_nearest_node(
+            self.nav_nodes, self.position[0], self.position[1]
+        )
+        if current_node is None:
+            logger.error(
+                'No nearest node for action, robot %s', self.name,
+            )
+            return
+
+        action_id = (
+            f'{category}_{self.cmd_id}_{uuid.uuid4().hex[:8]}'
+        )
+        action_params = [
+            ActionParameter(key=k, value=v)
+            for k, v in params.items()
+        ]
+        action = Action(
+            action_type=category,
+            action_id=action_id,
+            blocking_type=BlockingType.HARD,
+            action_parameters=action_params,
+        )
+
+        self._order_update_id += 1
+
+        # 경로 구성: 현재 노드 (Base) + 최종 목적지까지 Horizon
+        path = [current_node]
+        if (
+            self._final_destination
+            and self._final_destination != current_node
+        ):
+            extension = compute_path(
+                self.nav_graph, current_node,
+                self._final_destination,
+            )
+            if extension and len(extension) > 1:
+                path = path + extension[1:]
+
+        map_name = self._last_map or 'map1'
+        seq_start = self._last_stitch_seq_id
+
+        vda_nodes, vda_edges = build_vda5050_nodes_edges(
+            path, self.nav_nodes, map_name,
+            base_end_index=0,
+            seq_start=seq_start,
+        )
+
+        # Base 노드에 action 첨부
+        vda_nodes[0].actions.append(action)
+
+        # Stitch seq 유지 (base_end_index=0 → seq_start + 0)
+        self._last_stitch_seq_id = seq_start
+
+        logger.info(
+            'Action as order update [%s]: category=%s, '
+            'action_id=%s, order_id=%s, update_id=%d, '
+            'node=%s, path=%s',
+            self.name, category, action_id,
+            self._active_order_id, self._order_update_id,
+            current_node, path,
+        )
+
+        nav_args = (
+            self.name,
+            self.cmd_id,
+            vda_nodes,
+            vda_edges,
+            map_name,
+            self._active_order_id,
+            self._order_update_id,
+        )
+
         self.attempt_cmd_until_success(
-            cmd=self.api.start_activity,
-            args=(self.name, self.cmd_id, category, params),
+            cmd=lambda *a: self.api.navigate(
+                *a, track_action_id=action_id
+            ),
+            args=nav_args,
         )
 
     def attempt_cmd_until_success(
@@ -559,9 +703,8 @@ class RobotAdapter:
                 args=(self.name, self.cmd_id),
             )
 
-        with self._planned_path_lock:
-            self._rmf_planned_path = None
-        self._planned_path_event.clear()
+        self._navigate_target_position = None
+        self._is_navigating = False
 
         old_task_id = self._current_task_id
         self._active_order_id = None
@@ -569,6 +712,8 @@ class RobotAdapter:
         self._final_destination = None
         self._current_task_id = None
         self._last_nodes = []
+        self._last_stitch_seq_id = 0
+        self._last_map = None
         logger.info(
             'Order state reset for robot %s (task_id=%s)',
             self.name, old_task_id,
@@ -582,32 +727,6 @@ class RobotAdapter:
                 self._issue_cmd_thread.join(timeout=5.0)
             self._issue_cmd_thread = None
         self._cancel_cmd_event.clear()
-
-    def update_planned_path(self, path_data: dict) -> None:
-        """ROS topic에서 수신한 RMF planned path를 캐시한다."""
-        path = path_data.get('path')
-        if not path or not isinstance(path, list):
-            return
-        with self._planned_path_lock:
-            self._rmf_planned_path = list(path)
-        self._planned_path_event.set()
-        logger.info(
-            'Planned path updated for %s: %s', self.name, path,
-        )
-
-    def _get_planned_path(self) -> list[str] | None:
-        """캐시된 planned path를 조회한다. 유효하지 않으면 None."""
-        with self._planned_path_lock:
-            if self._rmf_planned_path is None:
-                return None
-            for wp_name in self._rmf_planned_path:
-                if wp_name not in self.nav_nodes:
-                    logger.warning(
-                        'Planned path has unknown node %s for %s',
-                        wp_name, self.name,
-                    )
-                    return None
-            return list(self._rmf_planned_path)
 
     def _interpolate_path(self, sparse_path: list[str]) -> list[str]:
         """Sparse path의 인접하지 않은 노드 쌍 사이를 보간한다.

@@ -31,7 +31,7 @@ rmf_fleet:
     loop: True
     delivery: True
     clean: False
-  actions: ["teleop"]
+  actions: ["teleop", "delivery_pickup", "delivery_dropoff"]
   finishing_request: "park"
   robots:
     AGV_001:
@@ -39,6 +39,7 @@ rmf_fleet:
     AGV_002:
       charger: "tinyRobot2_charger"
   robot_state_update_frequency: 10.0
+  arrival_threshold: 0.5            # meters, distance-based arrival detection
 
 # MQTT / VDA5050 CONFIG ========================================================
 fleet_manager:

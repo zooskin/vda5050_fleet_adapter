@@ -105,6 +105,8 @@ class Vda5050RobotAPI(RobotAPI):
         map_name: str,
         order_id: str = '',
         order_update_id: int = 0,
+        *,
+        track_action_id: str | None = None,
     ) -> RobotAPIResult:
         """VDA5050 Order를 전송하여 내비게이션을 시작한다.
 
@@ -116,6 +118,8 @@ class Vda5050RobotAPI(RobotAPI):
             map_name: 대상 맵 이름.
             order_id: 외부 지정 Order ID (빈 문자열이면 자동 생성).
             order_update_id: Order update 카운터.
+            track_action_id: nodeAction의 action_id. 제공 시 완료 추적에
+                order_id 대신 action_id를 사용한다.
 
         Returns:
             명령 결과.
@@ -140,17 +144,19 @@ class Vda5050RobotAPI(RobotAPI):
         topic = self._build_topic(robot_name, 'order')
         self._mqtt.publish(topic, payload, qos=0)
 
+        track_id = track_action_id if track_action_id else order_id
         with self._lock:
             if robot_name not in self._cmd_order_map:
                 self._cmd_order_map[robot_name] = {}
-            self._cmd_order_map[robot_name][cmd_id] = order_id
+            self._cmd_order_map[robot_name][cmd_id] = track_id
             if robot_name not in self._completed_cmds:
                 self._completed_cmds[robot_name] = set()
 
         logger.info(
             'Navigate order sent: robot=%s, cmd_id=%d, order_id=%s, '
-            'nodes=%d, edges=%d',
-            robot_name, cmd_id, order_id, len(nodes), len(edges),
+            'track_id=%s, nodes=%d, edges=%d',
+            robot_name, cmd_id, order_id, track_id,
+            len(nodes), len(edges),
         )
         return RobotAPIResult.SUCCESS
 

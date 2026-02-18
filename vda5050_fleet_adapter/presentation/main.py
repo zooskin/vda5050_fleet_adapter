@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import json
 import logging
 import sys
 import threading
@@ -19,11 +18,9 @@ import time
 import rclpy
 import rclpy.node
 from rclpy.parameter import Parameter
-from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 import rmf_adapter
 from rmf_adapter import Adapter
 import rmf_adapter.easy_full_control as rmf_easy
-from std_msgs.msg import String
 from vda5050_fleet_adapter.infra.mqtt.mqtt_client import MqttClient
 from vda5050_fleet_adapter.infra.mqtt.vda5050_robot_api import (
     Vda5050RobotAPI,
@@ -192,6 +189,9 @@ def main(argv: list[str] | None = None) -> None:
     )
 
     # 8. 로봇별 RobotAdapter 생성
+    arrival_threshold = config_yaml.get('rmf_fleet', {}).get(
+        'arrival_threshold', 0.5
+    )
     node.get_logger().info(f'known_robots: {fleet_config.known_robots}')
     robots: dict[str, RobotAdapter] = {}
     for robot_name in fleet_config.known_robots:
@@ -212,37 +212,10 @@ def main(argv: list[str] | None = None) -> None:
             nav_nodes=nav_nodes,
             nav_edges=nav_edges,
             nav_graph=nav_graph,
+            arrival_threshold=arrival_threshold,
         )
         robot.configuration = robot_config
         robots[robot_name] = robot
-
-    # 8b. Subscribe to RMF planned_path topic
-    planned_path_qos = QoSProfile(
-        depth=100,
-        reliability=ReliabilityPolicy.RELIABLE,
-        durability=DurabilityPolicy.TRANSIENT_LOCAL,
-    )
-
-    def _planned_path_callback(msg: String) -> None:
-        try:
-            data = json.loads(msg.data)
-        except json.JSONDecodeError:
-            node.get_logger().warning('Invalid JSON in planned_path')
-            return
-        robot_name = data.get('robot_name', '')
-        # C++ requester_id()는 "fleet/robot" 형식이므로
-        # fleet prefix를 제거하여 robots dict key와 매칭
-        short_name = robot_name.rsplit('/', 1)[-1]
-        if short_name in robots:
-            robots[short_name].update_planned_path(data)
-        elif robot_name in robots:
-            robots[robot_name].update_planned_path(data)
-
-    node.create_subscription(
-        String, 'planned_path', _planned_path_callback,
-        planned_path_qos,
-    )
-    node.get_logger().info('Subscribed to planned_path topic')
 
     # 9. 업데이트 루프
     update_period = 1.0 / config_yaml.get('rmf_fleet', {}).get(

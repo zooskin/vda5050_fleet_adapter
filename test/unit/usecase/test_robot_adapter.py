@@ -289,19 +289,22 @@ class TestRobotAdapterExecuteAction:
 class TestRobotAdapterUpdate:
     """update() 테스트."""
 
-    def test_update_completes_execution(self, adapter, mock_api):
-        """명령 완료 시 execution.finished()가 호출된다."""
+    def test_update_completes_navigate_by_distance(
+        self, adapter, mock_api
+    ):
+        """Navigate 도착 판정: 거리 threshold 이내면 완료."""
         execution = MagicMock()
         adapter.execution = execution
         adapter.cmd_id = 5
         adapter.update_handle = MagicMock()
-        mock_api.is_command_completed.return_value = True
+        adapter._is_navigating = True
+        adapter._navigate_target_position = [1.0, 2.0]
 
         state = MagicMock()
         data = RobotUpdateData(
             robot_name='AGV-001',
             map_name='map1',
-            position=[1.0, 2.0, 0.0],
+            position=[1.1, 2.1, 0.0],  # dist ~0.14, within 0.5
             battery_soc=0.85,
         )
 
@@ -309,6 +312,8 @@ class TestRobotAdapterUpdate:
 
         execution.finished.assert_called_once()
         assert adapter.execution is None
+        assert adapter._is_navigating is False
+        assert adapter._navigate_target_position is None
 
     def test_completion_preserves_order_during_task(
         self, adapter, mock_api
@@ -325,13 +330,14 @@ class TestRobotAdapterUpdate:
         adapter._order_update_id = 1
         adapter._final_destination = 'wp3'
         adapter._current_task_id = 'compose.dispatch-001'
-        mock_api.is_command_completed.return_value = True
+        adapter._is_navigating = True
+        adapter._navigate_target_position = [1.0, 2.0]
 
         state = MagicMock()
         data = RobotUpdateData(
             robot_name='AGV-001',
             map_name='map1',
-            position=[1.0, 2.0, 0.0],
+            position=[1.0, 2.0, 0.0],  # exact match
             battery_soc=0.85,
         )
 
@@ -358,13 +364,14 @@ class TestRobotAdapterUpdate:
         adapter._order_update_id = 1
         adapter._final_destination = 'wp3'
         adapter._current_task_id = 'compose.dispatch-001'
-        mock_api.is_command_completed.return_value = True
+        adapter._is_navigating = True
+        adapter._navigate_target_position = [1.0, 2.0]
 
         state = MagicMock()
         data = RobotUpdateData(
             robot_name='AGV-001',
             map_name='map1',
-            position=[1.0, 2.0, 0.0],
+            position=[1.0, 2.0, 0.0],  # at target
             battery_soc=0.85,
         )
 
@@ -377,18 +384,19 @@ class TestRobotAdapterUpdate:
     def test_update_keeps_execution_if_not_completed(
         self, adapter, mock_api
     ):
-        """명령 미완료 시 execution이 유지된다."""
+        """Navigate 미완료 시 (거리 초과) execution이 유지된다."""
         execution = MagicMock()
         adapter.execution = execution
         adapter.cmd_id = 5
         adapter.update_handle = MagicMock()
-        mock_api.is_command_completed.return_value = False
+        adapter._is_navigating = True
+        adapter._navigate_target_position = [10.0, 10.0]
 
         state = MagicMock()
         data = RobotUpdateData(
             robot_name='AGV-001',
             map_name='map1',
-            position=[1.0, 2.0, 0.0],
+            position=[1.0, 2.0, 0.0],  # far from target
             battery_soc=0.85,
         )
 
@@ -428,6 +436,195 @@ class TestRobotAdapterUpdate:
         adapter.update(state, data)
 
         assert adapter.position == [3.0, 4.0, 1.5]
+
+
+class TestDistanceBasedArrival:
+    """거리 기반 도착 판정 테스트."""
+
+    def test_navigate_within_threshold_completes(
+        self, adapter, mock_api
+    ):
+        """Navigate: threshold 이내 → 도착 완료."""
+        execution = MagicMock()
+        adapter.execution = execution
+        adapter.update_handle = MagicMock()
+        adapter._is_navigating = True
+        adapter._navigate_target_position = [5.0, 5.0]
+        adapter.arrival_threshold = 0.5
+
+        state = MagicMock()
+        data = RobotUpdateData(
+            robot_name='AGV-001', map_name='map1',
+            position=[5.3, 5.3, 0.0],  # dist ~0.42
+            battery_soc=0.85,
+        )
+
+        adapter.update(state, data)
+
+        execution.finished.assert_called_once()
+        assert adapter.execution is None
+
+    def test_navigate_beyond_threshold_not_completed(
+        self, adapter, mock_api
+    ):
+        """Navigate: threshold 초과 → 미완료."""
+        execution = MagicMock()
+        adapter.execution = execution
+        adapter.update_handle = MagicMock()
+        adapter._is_navigating = True
+        adapter._navigate_target_position = [5.0, 5.0]
+        adapter.arrival_threshold = 0.5
+
+        state = MagicMock()
+        data = RobotUpdateData(
+            robot_name='AGV-001', map_name='map1',
+            position=[4.0, 4.0, 0.0],  # dist ~1.41
+            battery_soc=0.85,
+        )
+
+        adapter.update(state, data)
+
+        execution.finished.assert_not_called()
+        assert adapter.execution is execution
+
+    def test_navigate_exact_threshold_completes(
+        self, adapter, mock_api
+    ):
+        """Navigate: 정확히 threshold 거리 → 도착 완료."""
+        execution = MagicMock()
+        adapter.execution = execution
+        adapter.update_handle = MagicMock()
+        adapter._is_navigating = True
+        adapter._navigate_target_position = [5.0, 0.0]
+        adapter.arrival_threshold = 0.5
+
+        state = MagicMock()
+        data = RobotUpdateData(
+            robot_name='AGV-001', map_name='map1',
+            position=[5.5, 0.0, 0.0],  # dist = 0.5
+            battery_soc=0.85,
+        )
+
+        adapter.update(state, data)
+
+        execution.finished.assert_called_once()
+        assert adapter.execution is None
+
+    def test_action_uses_is_command_completed(
+        self, adapter, mock_api
+    ):
+        """Action은 기존 is_command_completed 방식을 사용한다."""
+        execution = MagicMock()
+        adapter.execution = execution
+        adapter.cmd_id = 5
+        adapter.update_handle = MagicMock()
+        adapter._is_navigating = False
+        mock_api.is_command_completed.return_value = True
+
+        state = MagicMock()
+        data = RobotUpdateData(
+            robot_name='AGV-001', map_name='map1',
+            position=[100.0, 100.0, 0.0],  # far away, irrelevant
+            battery_soc=0.85,
+        )
+
+        adapter.update(state, data)
+
+        mock_api.is_command_completed.assert_called_once_with(
+            'AGV-001', 5
+        )
+        execution.finished.assert_called_once()
+        assert adapter.execution is None
+
+    def test_action_not_completed(self, adapter, mock_api):
+        """Action 미완료 시 execution이 유지된다."""
+        execution = MagicMock()
+        adapter.execution = execution
+        adapter.cmd_id = 5
+        adapter.update_handle = MagicMock()
+        adapter._is_navigating = False
+        mock_api.is_command_completed.return_value = False
+
+        state = MagicMock()
+        data = RobotUpdateData(
+            robot_name='AGV-001', map_name='map1',
+            position=[1.0, 2.0, 0.0],
+            battery_soc=0.85,
+        )
+
+        adapter.update(state, data)
+
+        execution.finished.assert_not_called()
+        assert adapter.execution is execution
+
+    def test_navigate_sets_target_position(self, adapter):
+        """navigate() 호출 시 _navigate_target_position이 설정된다."""
+        dest = MagicMock()
+        dest.position = [5.0, 3.0, 0.0]
+        dest.map = 'map1'
+        execution = MagicMock()
+
+        adapter.navigate(dest, execution)
+        adapter.cancel_cmd_attempt()
+
+        assert adapter._navigate_target_position == [5.0, 3.0]
+        assert adapter._is_navigating is True
+
+    def test_execute_action_clears_navigating(self, adapter):
+        """execute_action() 호출 시 _is_navigating이 False가 된다."""
+        adapter._is_navigating = True
+        adapter._navigate_target_position = [5.0, 3.0]
+        execution = MagicMock()
+
+        adapter.execute_action('charge', {}, execution)
+        adapter.cancel_cmd_attempt()
+
+        assert adapter._is_navigating is False
+
+    def test_custom_arrival_threshold(
+        self, mock_api, mock_node,
+        sample_nav_nodes, sample_nav_edges,
+    ):
+        """커스텀 arrival_threshold가 적용된다."""
+        from vda5050_fleet_adapter.infra.nav_graph.graph_utils import (
+            create_graph,
+        )
+        graph = create_graph(sample_nav_nodes, sample_nav_edges)
+        robot = RobotAdapter(
+            name='AGV-001', api=mock_api, node=mock_node,
+            fleet_handle=MagicMock(),
+            nav_nodes=sample_nav_nodes,
+            nav_edges=sample_nav_edges,
+            nav_graph=graph,
+            arrival_threshold=1.0,
+        )
+        robot.update_handle = MagicMock()
+
+        execution = MagicMock()
+        robot.execution = execution
+        robot._is_navigating = True
+        robot._navigate_target_position = [5.0, 0.0]
+
+        state = MagicMock()
+        # dist = 0.8, within 1.0 threshold
+        data = RobotUpdateData(
+            robot_name='AGV-001', map_name='map1',
+            position=[5.8, 0.0, 0.0], battery_soc=0.85,
+        )
+
+        robot.update(state, data)
+
+        execution.finished.assert_called_once()
+
+    def test_reset_order_clears_navigate_state(self, adapter):
+        """_reset_order_state가 navigate 상태를 초기화한다."""
+        adapter._is_navigating = True
+        adapter._navigate_target_position = [5.0, 3.0]
+
+        adapter._reset_order_state()
+
+        assert adapter._is_navigating is False
+        assert adapter._navigate_target_position is None
 
 
 class TestRobotAdapterRetry:
@@ -570,8 +767,7 @@ class TestOrderLifecycle:
 
         order_id = adapter_with_handle._active_order_id
 
-        # Command 완료 시뮬레이션
-        mock_api.is_command_completed.return_value = True
+        # Navigate 완료 시뮬레이션: 거리 기반 도착
         state = MagicMock()
         data = RobotUpdateData(
             robot_name='AGV-001', map_name='map1',
@@ -969,6 +1165,7 @@ class TestDetourPath:
         dest = MagicMock()
         dest.name = 'D'
         dest.final_name = 'C'
+        dest.waypoint_names = ['A', 'B', 'D', 'B', 'C']
         dest.position = [5.0, 5.0, 0.0]
         dest.map = 'L1'
         execution = MagicMock()
@@ -996,6 +1193,7 @@ class TestDetourPath:
         dest = MagicMock()
         dest.name = 'D'
         dest.final_name = 'C'
+        dest.waypoint_names = ['A', 'B', 'D', 'B', 'C']
         dest.position = [5.0, 5.0, 0.0]
         dest.map = 'L1'
         execution = MagicMock()
@@ -1071,165 +1269,6 @@ class TestStartNodeFix:
             assert nodes[0].node_id == 'wp1'
 
 
-class TestPlannedPath:
-    """RMF planned path topic 기반 경로 사용 테스트."""
-
-    def test_update_and_get_planned_path(self, adapter):
-        """update_planned_path로 캐시 저장 후 _get_planned_path로 조회."""
-        path_data = {
-            'robot_name': 'AGV-001',
-            'path': ['wp1', 'wp2', 'wp3'],
-        }
-        adapter.update_planned_path(path_data)
-
-        result = adapter._get_planned_path()
-        assert result == ['wp1', 'wp2', 'wp3']
-
-    def test_get_planned_path_none_when_empty(self, adapter):
-        """캐시가 비어있으면 None을 반환한다."""
-        assert adapter._get_planned_path() is None
-
-    def test_get_planned_path_none_for_unknown_nodes(self, adapter):
-        """미지 노드가 포함된 경로는 None을 반환한다."""
-        path_data = {
-            'robot_name': 'AGV-001',
-            'path': ['wp1', 'unknown_wp', 'wp3'],
-        }
-        adapter.update_planned_path(path_data)
-
-        assert adapter._get_planned_path() is None
-
-    def test_update_planned_path_ignores_invalid(self, adapter):
-        """유효하지 않은 path 데이터는 무시한다."""
-        adapter.update_planned_path({})
-        assert adapter._get_planned_path() is None
-
-        adapter.update_planned_path({'path': 'not_a_list'})
-        assert adapter._get_planned_path() is None
-
-        adapter.update_planned_path({'path': []})
-        assert adapter._get_planned_path() is None
-
-    def test_navigate_uses_planned_path(
-        self, adapter_with_handle, mock_api
-    ):
-        """Planned path가 있으면 compute_path 대신 사용한다."""
-        adapter_with_handle.position = [0.0, 0.0, 0.0]
-
-        # Set planned path
-        path_data = {
-            'robot_name': 'AGV-001',
-            'path': ['wp1', 'wp4', 'wp3', 'wp2'],
-        }
-        adapter_with_handle.update_planned_path(path_data)
-
-        dest = MagicMock()
-        dest.name = 'wp2'
-        dest.final_name = 'wp2'
-        dest.position = [5.0, 0.0, 0.0]
-        dest.map = 'map1'
-        execution = MagicMock()
-
-        adapter_with_handle.navigate(dest, execution)
-        adapter_with_handle.cancel_cmd_attempt()
-
-        call_args = mock_api.navigate.call_args[0]
-        nodes = call_args[2]
-        node_ids = [n.node_id for n in nodes]
-
-        # Should follow planned path wp1→wp4→wp3→wp2
-        assert node_ids == ['wp1', 'wp4', 'wp3', 'wp2']
-
-    def test_navigate_fallback_without_planned_path(
-        self, adapter_with_handle, mock_api
-    ):
-        """Planned path가 없으면 기존 compute_path를 사용한다."""
-        adapter_with_handle.position = [0.0, 0.0, 0.0]
-
-        dest = MagicMock()
-        dest.name = 'wp2'
-        dest.final_name = 'wp2'
-        dest.position = [5.0, 0.0, 0.0]
-        dest.map = 'map1'
-        execution = MagicMock()
-
-        adapter_with_handle.navigate(dest, execution)
-        adapter_with_handle.cancel_cmd_attempt()
-
-        # Should still call api.navigate successfully (fallback path)
-        mock_api.navigate.assert_called_once()
-
-    def test_planned_path_thread_safety(self, adapter):
-        """동시 update/get에서 예외가 발생하지 않는다."""
-        import concurrent.futures
-
-        def updater():
-            for _ in range(100):
-                adapter.update_planned_path({
-                    'path': ['wp1', 'wp2', 'wp3'],
-                })
-
-        def getter():
-            for _ in range(100):
-                adapter._get_planned_path()
-
-        with concurrent.futures.ThreadPoolExecutor(
-            max_workers=4
-        ) as executor:
-            futures = []
-            for _ in range(2):
-                futures.append(executor.submit(updater))
-                futures.append(executor.submit(getter))
-            for f in futures:
-                f.result()  # Should not raise
-
-    def test_reset_order_clears_planned_path(
-        self, adapter_with_handle, mock_api
-    ):
-        """_reset_order_state가 planned path 캐시를 초기화한다."""
-        adapter_with_handle.update_planned_path({
-            'path': ['wp1', 'wp2'],
-        })
-        assert adapter_with_handle._get_planned_path() is not None
-
-        adapter_with_handle._reset_order_state()
-
-        assert adapter_with_handle._get_planned_path() is None
-
-    def test_navigate_planned_path_bridge(
-        self, adapter_with_handle, mock_api
-    ):
-        """start_node이 planned path에 없으면 bridge로 연결한다."""
-        adapter_with_handle.position = [0.0, 5.0, 0.0]  # near wp4
-
-        path_data = {
-            'robot_name': 'AGV-001',
-            'path': ['wp2', 'wp3'],
-        }
-        adapter_with_handle.update_planned_path(path_data)
-
-        dest = MagicMock()
-        dest.name = 'wp3'
-        dest.final_name = 'wp3'
-        dest.position = [5.0, 5.0, 0.0]
-        dest.map = 'map1'
-        execution = MagicMock()
-
-        adapter_with_handle.navigate(dest, execution)
-        adapter_with_handle.cancel_cmd_attempt()
-
-        call_args = mock_api.navigate.call_args[0]
-        nodes = call_args[2]
-        node_ids = [n.node_id for n in nodes]
-
-        # wp4 is start, bridge to wp2 then follow planned path
-        # bridge: wp4→wp3→wp2, then planned: wp2→wp3
-        # combined: wp4→wp3→wp2→wp3
-        assert node_ids[0] == 'wp4'
-        assert 'wp2' in node_ids
-        assert 'wp3' in node_ids
-
-
 class TestTJunctionDetourWithPlannedPath:
     """T자 교차로 회피 시나리오: planned_path에 전체 회피경로 포함.
 
@@ -1281,14 +1320,11 @@ class TestTJunctionDetourWithPlannedPath:
     ):
         """planned_path=[A,B,D,B,C] → 전체 회피경로 그대로 사용."""
         t_adapter.position = [0.0, 0.0, 0.0]  # at A
-        t_adapter.update_planned_path({
-            'robot_name': 'AGV-001',
-            'path': ['A', 'B', 'D', 'B', 'C'],
-        })
 
         dest = MagicMock()
         dest.name = 'B'
         dest.final_name = 'C'
+        dest.waypoint_names = ['A', 'B', 'D', 'B', 'C']
         dest.position = [5.0, 0.0, 0.0]
         dest.map = 'L1'
         execution = MagicMock()
@@ -1308,14 +1344,11 @@ class TestTJunctionDetourWithPlannedPath:
     ):
         """3-tier 분리: Base=[A,B], Horizon-RMF=[D,B,C], ext=[]."""
         t_adapter.position = [0.0, 0.0, 0.0]
-        t_adapter.update_planned_path({
-            'robot_name': 'AGV-001',
-            'path': ['A', 'B', 'D', 'B', 'C'],
-        })
 
         dest = MagicMock()
         dest.name = 'B'
         dest.final_name = 'C'
+        dest.waypoint_names = ['A', 'B', 'D', 'B', 'C']
         dest.position = [5.0, 0.0, 0.0]
         dest.map = 'L1'
         execution = MagicMock()
@@ -1345,14 +1378,11 @@ class TestTJunctionDetourWithPlannedPath:
     ):
         """C가 planned_path에 포함되어 있으므로 tier3 확장 불필요."""
         t_adapter.position = [0.0, 0.0, 0.0]
-        t_adapter.update_planned_path({
-            'robot_name': 'AGV-001',
-            'path': ['A', 'B', 'D', 'B', 'C'],
-        })
 
         dest = MagicMock()
         dest.name = 'B'
         dest.final_name = 'C'
+        dest.waypoint_names = ['A', 'B', 'D', 'B', 'C']
         dest.position = [5.0, 0.0, 0.0]
         dest.map = 'L1'
         execution = MagicMock()
@@ -1374,34 +1404,28 @@ class TestTJunctionDetourWithPlannedPath:
     ):
         """D 도착 후 두 번째 navigate(dest=B, final=C).
 
-        Robot이 D에 도착, RMF가 다시 planned_path=[D,B,C] publish.
+        Robot이 D에 도착, RMF가 다시 waypoint_names=[D,B,C].
         navigate(dest=B, final=C) → D(base)→B(base)→C(horizon).
         """
         # 첫 navigate (task 시작)
         t_adapter.position = [0.0, 0.0, 0.0]
-        t_adapter.update_planned_path({
-            'robot_name': 'AGV-001',
-            'path': ['A', 'B', 'D', 'B', 'C'],
-        })
         dest1 = MagicMock()
         dest1.name = 'B'
         dest1.final_name = 'C'
+        dest1.waypoint_names = ['A', 'B', 'D', 'B', 'C']
         dest1.position = [5.0, 0.0, 0.0]
         dest1.map = 'L1'
         execution1 = MagicMock()
         t_adapter.navigate(dest1, execution1)
         t_adapter.cancel_cmd_attempt()
 
-        # D에 도착, 새 planned_path 수신
+        # D에 도착
         t_adapter.position = [5.0, 5.0, 0.0]  # at D
-        t_adapter.update_planned_path({
-            'robot_name': 'AGV-001',
-            'path': ['D', 'B', 'C'],
-        })
 
         dest2 = MagicMock()
         dest2.name = 'B'
         dest2.final_name = 'C'
+        dest2.waypoint_names = ['D', 'B', 'C']
         dest2.position = [5.0, 0.0, 0.0]
         dest2.map = 'L1'
         execution2 = MagicMock()
@@ -1425,18 +1449,15 @@ class TestTJunctionDetourWithPlannedPath:
     ):
         """B 도착 후 마지막 navigate(dest=C, final=C).
 
-        Robot이 B에 도착, RMF가 planned_path=[B,C] publish.
+        Robot이 B에 도착, RMF가 waypoint_names=[B,C].
         navigate(dest=C, final=C) → B(base)→C(base), 모두 released.
         """
         # 첫 navigate (task 시작)
         t_adapter.position = [0.0, 0.0, 0.0]
-        t_adapter.update_planned_path({
-            'robot_name': 'AGV-001',
-            'path': ['A', 'B', 'D', 'B', 'C'],
-        })
         dest1 = MagicMock()
         dest1.name = 'B'
         dest1.final_name = 'C'
+        dest1.waypoint_names = ['A', 'B', 'D', 'B', 'C']
         dest1.position = [5.0, 0.0, 0.0]
         dest1.map = 'L1'
         t_adapter.navigate(dest1, MagicMock())
@@ -1444,14 +1465,11 @@ class TestTJunctionDetourWithPlannedPath:
 
         # B에 도착, 마지막 segment
         t_adapter.position = [5.0, 0.0, 0.0]  # at B
-        t_adapter.update_planned_path({
-            'robot_name': 'AGV-001',
-            'path': ['B', 'C'],
-        })
 
         dest3 = MagicMock()
         dest3.name = 'C'
         dest3.final_name = 'C'
+        dest3.waypoint_names = ['B', 'C']
         dest3.position = [10.0, 0.0, 0.0]
         dest3.map = 'L1'
         t_adapter.navigate(dest3, MagicMock())
@@ -1515,14 +1533,11 @@ class TestSparsePathInterpolation:
     ):
         """[n1,n3,n5,n7] → [n1,n2,n3,n4,n5,n6,n7]로 보간."""
         linear_adapter.position = [1.0, 0.0, 0.0]  # at n1
-        linear_adapter.update_planned_path({
-            'robot_name': 'AGV-001',
-            'path': ['n1', 'n3', 'n5', 'n7'],
-        })
 
         dest = MagicMock()
         dest.name = 'n3'
         dest.final_name = 'n7'
+        dest.waypoint_names = ['n1', 'n3', 'n5', 'n7']
         dest.position = [3.0, 0.0, 0.0]
         dest.map = 'L1'
 
@@ -1540,14 +1555,11 @@ class TestSparsePathInterpolation:
     ):
         """보간 후 3-tier 분리: dest=n3, final=n7."""
         linear_adapter.position = [1.0, 0.0, 0.0]
-        linear_adapter.update_planned_path({
-            'robot_name': 'AGV-001',
-            'path': ['n1', 'n3', 'n5', 'n7'],
-        })
 
         dest = MagicMock()
         dest.name = 'n3'
         dest.final_name = 'n7'
+        dest.waypoint_names = ['n1', 'n3', 'n5', 'n7']
         dest.position = [3.0, 0.0, 0.0]
         dest.map = 'L1'
 
@@ -1573,14 +1585,11 @@ class TestSparsePathInterpolation:
     ):
         """이미 연속된 경로 [n1,n2,n3]은 변경 없음."""
         linear_adapter.position = [1.0, 0.0, 0.0]
-        linear_adapter.update_planned_path({
-            'robot_name': 'AGV-001',
-            'path': ['n1', 'n2', 'n3'],
-        })
 
         dest = MagicMock()
         dest.name = 'n2'
         dest.final_name = 'n3'
+        dest.waypoint_names = ['n1', 'n2', 'n3']
         dest.position = [2.0, 0.0, 0.0]
         dest.map = 'L1'
 
@@ -1596,23 +1605,20 @@ class TestSparsePathInterpolation:
     def test_sparse_path_includes_pre_destination_nodes(
         self, linear_adapter, mock_api
     ):
-        """planned_path에 destination 이전 노드 포함 시 중복 없음.
+        """waypoint_names에 destination 이전 노드 포함 시 중복 없음.
 
-        planned_path=[n1,n3,n5], dest=n2, final=n7
+        waypoint_names=[n1,n3,n5], dest=n2, final=n7
         → interpolated=[n1,n2,n3,n4,n5]
         → start=n1부터 slice → [n1,n2,n3,n4,n5]
         → tier3 extension → [n1,n2,n3,n4,n5,n6,n7]
         → 중복 노드 없어야 함.
         """
         linear_adapter.position = [1.0, 0.0, 0.0]  # at n1
-        linear_adapter.update_planned_path({
-            'robot_name': 'AGV-001',
-            'path': ['n1', 'n3', 'n5'],
-        })
 
         dest = MagicMock()
         dest.name = 'n2'
         dest.final_name = 'n7'
+        dest.waypoint_names = ['n1', 'n3', 'n5']
         dest.position = [2.0, 0.0, 0.0]
         dest.map = 'L1'
 
@@ -1638,3 +1644,487 @@ class TestSparsePathInterpolation:
         assert nodes[1].released is True   # n2 (dest)
         assert nodes[2].released is False  # n3
         assert nodes[6].released is False  # n7
+
+
+class TestStitchingSequenceId:
+    """Order update 시 sequenceId stitching 테스트."""
+
+    def test_first_order_seq_starts_at_zero(
+        self, adapter_with_handle, mock_api
+    ):
+        """첫 번째 order의 sequenceId가 0부터 시작한다."""
+        adapter_with_handle.position = [0.0, 0.0, 0.0]
+
+        dest = MagicMock()
+        dest.name = 'wp2'
+        dest.final_name = 'wp3'
+        dest.position = [5.0, 0.0, 0.0]
+        dest.map = 'map1'
+        adapter_with_handle.navigate(dest, MagicMock())
+        adapter_with_handle.cancel_cmd_attempt()
+
+        nodes = mock_api.navigate.call_args[0][2]
+        assert nodes[0].sequence_id == 0
+
+    def test_order_update_seq_continues_from_stitch(
+        self, adapter_with_handle, mock_api
+    ):
+        """Order update 시 stitching node의 sequenceId가 유지된다."""
+        adapter_with_handle.position = [0.0, 0.0, 0.0]
+
+        # 첫 navigate: wp1→wp2→wp3, dest=wp2 (base_end_index=1)
+        dest1 = MagicMock()
+        dest1.name = 'wp2'
+        dest1.final_name = 'wp3'
+        dest1.position = [5.0, 0.0, 0.0]
+        dest1.map = 'map1'
+        adapter_with_handle.navigate(dest1, MagicMock())
+        adapter_with_handle.cancel_cmd_attempt()
+
+        first_nodes = mock_api.navigate.call_args[0][2]
+        first_node_ids = [n.node_id for n in first_nodes]
+
+        # wp2의 sequenceId 확인 (stitching point)
+        wp2_idx = first_node_ids.index('wp2')
+        stitch_seq = first_nodes[wp2_idx].sequence_id
+
+        # 두 번째 navigate (order update): wp2→wp3
+        adapter_with_handle.position = [5.0, 0.0, 0.0]
+        dest2 = MagicMock()
+        dest2.name = 'wp3'
+        dest2.final_name = 'wp3'
+        dest2.waypoint_names = ['wp2', 'wp3']
+        dest2.position = [5.0, 5.0, 0.0]
+        dest2.map = 'map1'
+        adapter_with_handle.navigate(dest2, MagicMock())
+        adapter_with_handle.cancel_cmd_attempt()
+
+        second_nodes = mock_api.navigate.call_args[0][2]
+        # stitching node (첫 노드)의 sequenceId == 이전 Base 마지막 노드
+        assert second_nodes[0].sequence_id == stitch_seq
+
+    def test_new_order_resets_seq_to_zero(
+        self, adapter_with_handle, mock_api
+    ):
+        """Negotiation 후 새 order는 sequenceId 0부터 시작한다."""
+        adapter_with_handle.position = [0.0, 0.0, 0.0]
+
+        # 첫 navigate
+        dest1 = MagicMock()
+        dest1.name = 'wp2'
+        dest1.final_name = 'wp3'
+        dest1.position = [5.0, 0.0, 0.0]
+        dest1.map = 'map1'
+        exec1 = MagicMock()
+        adapter_with_handle.navigate(dest1, exec1)
+        adapter_with_handle.cancel_cmd_attempt()
+
+        # stop → negotiation pause
+        activity = MagicMock()
+        exec1.identifier.is_same.return_value = True
+        adapter_with_handle.stop(activity)
+
+        # navigate → cancel + new order (새 orderID)
+        dest2 = MagicMock()
+        dest2.name = 'wp3'
+        dest2.final_name = 'wp3'
+        dest2.position = [5.0, 5.0, 0.0]
+        dest2.map = 'map1'
+        adapter_with_handle.navigate(dest2, MagicMock())
+        # 스레드 완료 대기
+        if adapter_with_handle._issue_cmd_thread is not None:
+            adapter_with_handle._issue_cmd_thread.join(timeout=5.0)
+
+        # 새 order의 sequenceId는 0부터
+        nodes = mock_api.navigate.call_args[0][2]
+        assert nodes[0].sequence_id == 0
+
+    def test_reset_order_clears_stitch_seq(
+        self, adapter_with_handle, mock_api
+    ):
+        """_reset_order_state가 _last_stitch_seq_id를 초기화한다."""
+        adapter_with_handle._last_stitch_seq_id = 42
+
+        adapter_with_handle._reset_order_state()
+
+        assert adapter_with_handle._last_stitch_seq_id == 0
+
+
+class TestExecuteActionAsOrderUpdate:
+    """execute_action()이 active order 시 nodeAction order update를 전송."""
+
+    def test_action_with_active_order_sends_navigate(
+        self, adapter_with_handle, mock_api
+    ):
+        """Active order 있으면 api.navigate()로 order update 전송."""
+        adapter_with_handle.position = [0.0, 0.0, 0.0]
+
+        # 먼저 navigate로 active order 생성
+        dest = MagicMock()
+        dest.name = 'wp2'
+        dest.final_name = 'wp3'
+        dest.position = [5.0, 0.0, 0.0]
+        dest.map = 'map1'
+        adapter_with_handle.navigate(dest, MagicMock())
+        adapter_with_handle.cancel_cmd_attempt()
+
+        order_id = adapter_with_handle._active_order_id
+        assert order_id is not None
+        mock_api.navigate.reset_mock()
+
+        # execute_action → order update (navigate 호출)
+        adapter_with_handle.position = [5.0, 0.0, 0.0]
+        adapter_with_handle.execute_action('pick', {}, MagicMock())
+        adapter_with_handle.cancel_cmd_attempt()
+
+        # api.navigate가 호출됨 (start_activity가 아님)
+        mock_api.navigate.assert_called_once()
+        mock_api.start_activity.assert_not_called()
+
+    def test_action_without_active_order_sends_instant(
+        self, adapter_with_handle, mock_api
+    ):
+        """Active order 없으면 기존 instantAction 방식 사용."""
+        adapter_with_handle.position = [0.0, 0.0, 0.0]
+        assert adapter_with_handle._active_order_id is None
+
+        adapter_with_handle.execute_action(
+            'charge', {}, MagicMock()
+        )
+        adapter_with_handle.cancel_cmd_attempt()
+
+        mock_api.start_activity.assert_called_once()
+        mock_api.navigate.assert_not_called()
+
+    def test_action_order_update_uses_same_order_id(
+        self, adapter_with_handle, mock_api
+    ):
+        """Order update가 같은 orderID를 사용한다."""
+        adapter_with_handle.position = [0.0, 0.0, 0.0]
+
+        dest = MagicMock()
+        dest.name = 'wp2'
+        dest.final_name = 'wp3'
+        dest.position = [5.0, 0.0, 0.0]
+        dest.map = 'map1'
+        adapter_with_handle.navigate(dest, MagicMock())
+        adapter_with_handle.cancel_cmd_attempt()
+
+        order_id = adapter_with_handle._active_order_id
+        mock_api.navigate.reset_mock()
+
+        adapter_with_handle.position = [5.0, 0.0, 0.0]
+        adapter_with_handle.execute_action('pick', {}, MagicMock())
+        adapter_with_handle.cancel_cmd_attempt()
+
+        call_args = mock_api.navigate.call_args
+        # positional args: (name, cmd_id, nodes, edges, map, order_id, update_id)
+        assert call_args[0][5] == order_id
+
+    def test_action_order_update_increments_update_id(
+        self, adapter_with_handle, mock_api
+    ):
+        """Order update의 update_id가 증가한다."""
+        adapter_with_handle.position = [0.0, 0.0, 0.0]
+
+        dest = MagicMock()
+        dest.name = 'wp2'
+        dest.final_name = 'wp3'
+        dest.position = [5.0, 0.0, 0.0]
+        dest.map = 'map1'
+        adapter_with_handle.navigate(dest, MagicMock())
+        adapter_with_handle.cancel_cmd_attempt()
+
+        assert adapter_with_handle._order_update_id == 0
+        mock_api.navigate.reset_mock()
+
+        adapter_with_handle.position = [5.0, 0.0, 0.0]
+        adapter_with_handle.execute_action('pick', {}, MagicMock())
+        adapter_with_handle.cancel_cmd_attempt()
+
+        assert adapter_with_handle._order_update_id == 1
+        call_args = mock_api.navigate.call_args
+        assert call_args[0][6] == 1  # order_update_id
+
+    def test_action_node_has_action_attached(
+        self, adapter_with_handle, mock_api
+    ):
+        """Order update의 노드에 action이 첨부된다."""
+        adapter_with_handle.position = [0.0, 0.0, 0.0]
+
+        dest = MagicMock()
+        dest.name = 'wp2'
+        dest.final_name = 'wp3'
+        dest.position = [5.0, 0.0, 0.0]
+        dest.map = 'map1'
+        adapter_with_handle.navigate(dest, MagicMock())
+        adapter_with_handle.cancel_cmd_attempt()
+        mock_api.navigate.reset_mock()
+
+        adapter_with_handle.position = [5.0, 0.0, 0.0]
+        adapter_with_handle.execute_action(
+            'pick', {'station': 'A'}, MagicMock()
+        )
+        adapter_with_handle.cancel_cmd_attempt()
+
+        nodes = mock_api.navigate.call_args[0][2]
+        # 첫 노드(base)에 action 첨부
+        assert len(nodes[0].actions) == 1
+        action = nodes[0].actions[0]
+        assert action.action_type == 'pick'
+        assert action.blocking_type.value == 'HARD'
+        assert len(action.action_parameters) == 1
+        assert action.action_parameters[0].key == 'station'
+
+    def test_action_tracks_action_id(
+        self, adapter_with_handle, mock_api
+    ):
+        """Order update가 track_action_id를 전달한다."""
+        adapter_with_handle.position = [0.0, 0.0, 0.0]
+
+        dest = MagicMock()
+        dest.name = 'wp2'
+        dest.final_name = 'wp3'
+        dest.position = [5.0, 0.0, 0.0]
+        dest.map = 'map1'
+        adapter_with_handle.navigate(dest, MagicMock())
+        adapter_with_handle.cancel_cmd_attempt()
+        mock_api.navigate.reset_mock()
+
+        adapter_with_handle.position = [5.0, 0.0, 0.0]
+        adapter_with_handle.execute_action('pick', {}, MagicMock())
+        adapter_with_handle.cancel_cmd_attempt()
+
+        call_kwargs = mock_api.navigate.call_args[1]
+        assert 'track_action_id' in call_kwargs
+        assert call_kwargs['track_action_id'].startswith('pick_')
+
+    def test_action_base_node_is_current_position(
+        self, adapter_with_handle, mock_api
+    ):
+        """Action order update의 base 노드가 현재 위치이다."""
+        adapter_with_handle.position = [0.0, 0.0, 0.0]
+
+        dest = MagicMock()
+        dest.name = 'wp2'
+        dest.final_name = 'wp3'
+        dest.position = [5.0, 0.0, 0.0]
+        dest.map = 'map1'
+        adapter_with_handle.navigate(dest, MagicMock())
+        adapter_with_handle.cancel_cmd_attempt()
+        mock_api.navigate.reset_mock()
+
+        # 현재 위치를 wp2(5,0)으로 설정
+        adapter_with_handle.position = [5.0, 0.0, 0.0]
+        adapter_with_handle.execute_action('pick', {}, MagicMock())
+        adapter_with_handle.cancel_cmd_attempt()
+
+        nodes = mock_api.navigate.call_args[0][2]
+        # Base 노드 = wp2
+        assert nodes[0].node_id == 'wp2'
+        assert nodes[0].released is True
+
+    def test_action_includes_horizon_to_final_dest(
+        self, adapter_with_handle, mock_api
+    ):
+        """Action order update가 최종 목적지까지 horizon을 포함한다."""
+        adapter_with_handle.position = [0.0, 0.0, 0.0]
+
+        dest = MagicMock()
+        dest.name = 'wp2'
+        dest.final_name = 'wp3'
+        dest.position = [5.0, 0.0, 0.0]
+        dest.map = 'map1'
+        adapter_with_handle.navigate(dest, MagicMock())
+        adapter_with_handle.cancel_cmd_attempt()
+        mock_api.navigate.reset_mock()
+
+        adapter_with_handle.position = [5.0, 0.0, 0.0]
+        adapter_with_handle.execute_action('pick', {}, MagicMock())
+        adapter_with_handle.cancel_cmd_attempt()
+
+        nodes = mock_api.navigate.call_args[0][2]
+        node_ids = [n.node_id for n in nodes]
+        # wp2(base) → wp3(horizon) (final_destination=wp3)
+        assert node_ids == ['wp2', 'wp3']
+        assert nodes[0].released is True   # base
+        assert nodes[1].released is False  # horizon
+
+    def test_action_no_horizon_when_at_final_dest(
+        self, adapter_with_handle, mock_api
+    ):
+        """최종 목적지에서 action 시 horizon 없음."""
+        adapter_with_handle.position = [0.0, 0.0, 0.0]
+
+        dest = MagicMock()
+        dest.name = 'wp2'
+        dest.final_name = 'wp2'
+        dest.position = [5.0, 0.0, 0.0]
+        dest.map = 'map1'
+        adapter_with_handle.navigate(dest, MagicMock())
+        adapter_with_handle.cancel_cmd_attempt()
+        mock_api.navigate.reset_mock()
+
+        adapter_with_handle.position = [5.0, 0.0, 0.0]
+        adapter_with_handle.execute_action('pick', {}, MagicMock())
+        adapter_with_handle.cancel_cmd_attempt()
+
+        nodes = mock_api.navigate.call_args[0][2]
+        node_ids = [n.node_id for n in nodes]
+        assert node_ids == ['wp2']
+        assert nodes[0].released is True
+
+
+class TestCartDeliveryFlow:
+    """Cart delivery 전체 플로우 테스트.
+
+    Scenario: wp1 → wp2(pickup) → wp3(dropoff)
+    Phase 1: navigate to wp2
+    Phase 2: execute 'pick' action at wp2
+    Phase 3: navigate to wp3
+    Phase 4: execute 'drop' action at wp3
+    """
+
+    def test_full_cart_delivery_flow(
+        self, adapter_with_handle, mock_api
+    ):
+        """Cart delivery: navigate→pick→navigate→drop."""
+        adapter_with_handle.position = [0.0, 0.0, 0.0]
+
+        # Phase 1: navigate to wp2 (pickup)
+        dest1 = MagicMock()
+        dest1.name = 'wp2'
+        dest1.final_name = 'wp2'
+        dest1.position = [5.0, 0.0, 0.0]
+        dest1.map = 'map1'
+        adapter_with_handle.navigate(dest1, MagicMock())
+        adapter_with_handle.cancel_cmd_attempt()
+
+        order_id = adapter_with_handle._active_order_id
+        assert order_id is not None
+        assert adapter_with_handle._order_update_id == 0
+
+        # Phase 2: pick action at wp2
+        adapter_with_handle.position = [5.0, 0.0, 0.0]
+        adapter_with_handle.execute_action(
+            'pick', {'station': 'A'}, MagicMock()
+        )
+        adapter_with_handle.cancel_cmd_attempt()
+
+        # 같은 orderID, update_id 증가
+        assert adapter_with_handle._active_order_id == order_id
+        assert adapter_with_handle._order_update_id == 1
+
+        # Phase 3: navigate to wp3 (dropoff)
+        dest2 = MagicMock()
+        dest2.name = 'wp3'
+        dest2.final_name = 'wp3'
+        dest2.position = [5.0, 5.0, 0.0]
+        dest2.map = 'map1'
+        adapter_with_handle.navigate(dest2, MagicMock())
+        adapter_with_handle.cancel_cmd_attempt()
+
+        # 같은 orderID, update_id 증가
+        assert adapter_with_handle._active_order_id == order_id
+        assert adapter_with_handle._order_update_id == 2
+
+        # Phase 4: drop action at wp3
+        adapter_with_handle.position = [5.0, 5.0, 0.0]
+        adapter_with_handle.execute_action(
+            'drop', {'station': 'B'}, MagicMock()
+        )
+        adapter_with_handle.cancel_cmd_attempt()
+
+        assert adapter_with_handle._active_order_id == order_id
+        assert adapter_with_handle._order_update_id == 3
+
+        # 전체 api.navigate 호출: 4회
+        # (nav1 + action1 + nav2 + action2)
+        assert mock_api.navigate.call_count == 4
+        # instantAction은 사용되지 않음
+        mock_api.start_activity.assert_not_called()
+
+    def test_cart_delivery_action_nodes_have_actions(
+        self, adapter_with_handle, mock_api
+    ):
+        """Cart delivery에서 action order update의 노드에 action 첨부."""
+        adapter_with_handle.position = [0.0, 0.0, 0.0]
+
+        # Phase 1: navigate
+        dest1 = MagicMock()
+        dest1.name = 'wp2'
+        dest1.final_name = 'wp2'
+        dest1.position = [5.0, 0.0, 0.0]
+        dest1.map = 'map1'
+        adapter_with_handle.navigate(dest1, MagicMock())
+        adapter_with_handle.cancel_cmd_attempt()
+
+        # Phase 2: pick
+        adapter_with_handle.position = [5.0, 0.0, 0.0]
+        adapter_with_handle.execute_action('pick', {}, MagicMock())
+        adapter_with_handle.cancel_cmd_attempt()
+
+        # pick order update 확인
+        pick_call = mock_api.navigate.call_args_list[1]
+        pick_nodes = pick_call[0][2]
+        assert len(pick_nodes[0].actions) == 1
+        assert pick_nodes[0].actions[0].action_type == 'pick'
+
+        # track_action_id 확인
+        assert 'track_action_id' in pick_call[1]
+        assert pick_call[1]['track_action_id'].startswith('pick_')
+
+    def test_cart_delivery_stitch_seq_continuity(
+        self, adapter_with_handle, mock_api
+    ):
+        """Cart delivery에서 sequenceId가 올바르게 이어진다."""
+        adapter_with_handle.position = [0.0, 0.0, 0.0]
+
+        # Phase 1: navigate to wp2
+        dest1 = MagicMock()
+        dest1.name = 'wp2'
+        dest1.final_name = 'wp2'
+        dest1.position = [5.0, 0.0, 0.0]
+        dest1.map = 'map1'
+        adapter_with_handle.navigate(dest1, MagicMock())
+        adapter_with_handle.cancel_cmd_attempt()
+
+        nav1_nodes = mock_api.navigate.call_args[0][2]
+        # wp1(seq=0), wp2(seq=2) → stitch_seq = 2
+        wp2_seq = None
+        for n in nav1_nodes:
+            if n.node_id == 'wp2':
+                wp2_seq = n.sequence_id
+        assert wp2_seq is not None
+
+        # Phase 2: pick action at wp2
+        adapter_with_handle.position = [5.0, 0.0, 0.0]
+        adapter_with_handle.execute_action('pick', {}, MagicMock())
+        adapter_with_handle.cancel_cmd_attempt()
+
+        pick_nodes = mock_api.navigate.call_args[0][2]
+        # action order update의 첫 노드 seq == stitch_seq
+        assert pick_nodes[0].sequence_id == wp2_seq
+
+        # Phase 3: navigate to wp3
+        dest2 = MagicMock()
+        dest2.name = 'wp3'
+        dest2.final_name = 'wp3'
+        dest2.position = [5.0, 5.0, 0.0]
+        dest2.map = 'map1'
+        adapter_with_handle.navigate(dest2, MagicMock())
+        adapter_with_handle.cancel_cmd_attempt()
+
+        nav2_nodes = mock_api.navigate.call_args[0][2]
+        # stitch node의 seq == wp2_seq (action 이후에도 유지)
+        assert nav2_nodes[0].sequence_id == wp2_seq
+
+    def test_reset_order_clears_last_map(
+        self, adapter_with_handle
+    ):
+        """_reset_order_state가 _last_map을 초기화한다."""
+        adapter_with_handle._last_map = 'map1'
+
+        adapter_with_handle._reset_order_state()
+
+        assert adapter_with_handle._last_map is None
