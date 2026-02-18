@@ -289,19 +289,22 @@ class TestRobotAdapterExecuteAction:
 class TestRobotAdapterUpdate:
     """update() 테스트."""
 
-    def test_update_completes_execution(self, adapter, mock_api):
-        """명령 완료 시 execution.finished()가 호출된다."""
+    def test_update_completes_navigate_by_distance(
+        self, adapter, mock_api
+    ):
+        """Navigate 도착 판정: 거리 threshold 이내면 완료."""
         execution = MagicMock()
         adapter.execution = execution
         adapter.cmd_id = 5
         adapter.update_handle = MagicMock()
-        mock_api.is_command_completed.return_value = True
+        adapter._is_navigating = True
+        adapter._navigate_target_position = [1.0, 2.0]
 
         state = MagicMock()
         data = RobotUpdateData(
             robot_name='AGV-001',
             map_name='map1',
-            position=[1.0, 2.0, 0.0],
+            position=[1.1, 2.1, 0.0],  # dist ~0.14, within 0.5
             battery_soc=0.85,
         )
 
@@ -309,6 +312,8 @@ class TestRobotAdapterUpdate:
 
         execution.finished.assert_called_once()
         assert adapter.execution is None
+        assert adapter._is_navigating is False
+        assert adapter._navigate_target_position is None
 
     def test_completion_preserves_order_during_task(
         self, adapter, mock_api
@@ -325,13 +330,14 @@ class TestRobotAdapterUpdate:
         adapter._order_update_id = 1
         adapter._final_destination = 'wp3'
         adapter._current_task_id = 'compose.dispatch-001'
-        mock_api.is_command_completed.return_value = True
+        adapter._is_navigating = True
+        adapter._navigate_target_position = [1.0, 2.0]
 
         state = MagicMock()
         data = RobotUpdateData(
             robot_name='AGV-001',
             map_name='map1',
-            position=[1.0, 2.0, 0.0],
+            position=[1.0, 2.0, 0.0],  # exact match
             battery_soc=0.85,
         )
 
@@ -358,13 +364,14 @@ class TestRobotAdapterUpdate:
         adapter._order_update_id = 1
         adapter._final_destination = 'wp3'
         adapter._current_task_id = 'compose.dispatch-001'
-        mock_api.is_command_completed.return_value = True
+        adapter._is_navigating = True
+        adapter._navigate_target_position = [1.0, 2.0]
 
         state = MagicMock()
         data = RobotUpdateData(
             robot_name='AGV-001',
             map_name='map1',
-            position=[1.0, 2.0, 0.0],
+            position=[1.0, 2.0, 0.0],  # at target
             battery_soc=0.85,
         )
 
@@ -377,18 +384,19 @@ class TestRobotAdapterUpdate:
     def test_update_keeps_execution_if_not_completed(
         self, adapter, mock_api
     ):
-        """명령 미완료 시 execution이 유지된다."""
+        """Navigate 미완료 시 (거리 초과) execution이 유지된다."""
         execution = MagicMock()
         adapter.execution = execution
         adapter.cmd_id = 5
         adapter.update_handle = MagicMock()
-        mock_api.is_command_completed.return_value = False
+        adapter._is_navigating = True
+        adapter._navigate_target_position = [10.0, 10.0]
 
         state = MagicMock()
         data = RobotUpdateData(
             robot_name='AGV-001',
             map_name='map1',
-            position=[1.0, 2.0, 0.0],
+            position=[1.0, 2.0, 0.0],  # far from target
             battery_soc=0.85,
         )
 
@@ -428,6 +436,195 @@ class TestRobotAdapterUpdate:
         adapter.update(state, data)
 
         assert adapter.position == [3.0, 4.0, 1.5]
+
+
+class TestDistanceBasedArrival:
+    """거리 기반 도착 판정 테스트."""
+
+    def test_navigate_within_threshold_completes(
+        self, adapter, mock_api
+    ):
+        """Navigate: threshold 이내 → 도착 완료."""
+        execution = MagicMock()
+        adapter.execution = execution
+        adapter.update_handle = MagicMock()
+        adapter._is_navigating = True
+        adapter._navigate_target_position = [5.0, 5.0]
+        adapter.arrival_threshold = 0.5
+
+        state = MagicMock()
+        data = RobotUpdateData(
+            robot_name='AGV-001', map_name='map1',
+            position=[5.3, 5.3, 0.0],  # dist ~0.42
+            battery_soc=0.85,
+        )
+
+        adapter.update(state, data)
+
+        execution.finished.assert_called_once()
+        assert adapter.execution is None
+
+    def test_navigate_beyond_threshold_not_completed(
+        self, adapter, mock_api
+    ):
+        """Navigate: threshold 초과 → 미완료."""
+        execution = MagicMock()
+        adapter.execution = execution
+        adapter.update_handle = MagicMock()
+        adapter._is_navigating = True
+        adapter._navigate_target_position = [5.0, 5.0]
+        adapter.arrival_threshold = 0.5
+
+        state = MagicMock()
+        data = RobotUpdateData(
+            robot_name='AGV-001', map_name='map1',
+            position=[4.0, 4.0, 0.0],  # dist ~1.41
+            battery_soc=0.85,
+        )
+
+        adapter.update(state, data)
+
+        execution.finished.assert_not_called()
+        assert adapter.execution is execution
+
+    def test_navigate_exact_threshold_completes(
+        self, adapter, mock_api
+    ):
+        """Navigate: 정확히 threshold 거리 → 도착 완료."""
+        execution = MagicMock()
+        adapter.execution = execution
+        adapter.update_handle = MagicMock()
+        adapter._is_navigating = True
+        adapter._navigate_target_position = [5.0, 0.0]
+        adapter.arrival_threshold = 0.5
+
+        state = MagicMock()
+        data = RobotUpdateData(
+            robot_name='AGV-001', map_name='map1',
+            position=[5.5, 0.0, 0.0],  # dist = 0.5
+            battery_soc=0.85,
+        )
+
+        adapter.update(state, data)
+
+        execution.finished.assert_called_once()
+        assert adapter.execution is None
+
+    def test_action_uses_is_command_completed(
+        self, adapter, mock_api
+    ):
+        """Action은 기존 is_command_completed 방식을 사용한다."""
+        execution = MagicMock()
+        adapter.execution = execution
+        adapter.cmd_id = 5
+        adapter.update_handle = MagicMock()
+        adapter._is_navigating = False
+        mock_api.is_command_completed.return_value = True
+
+        state = MagicMock()
+        data = RobotUpdateData(
+            robot_name='AGV-001', map_name='map1',
+            position=[100.0, 100.0, 0.0],  # far away, irrelevant
+            battery_soc=0.85,
+        )
+
+        adapter.update(state, data)
+
+        mock_api.is_command_completed.assert_called_once_with(
+            'AGV-001', 5
+        )
+        execution.finished.assert_called_once()
+        assert adapter.execution is None
+
+    def test_action_not_completed(self, adapter, mock_api):
+        """Action 미완료 시 execution이 유지된다."""
+        execution = MagicMock()
+        adapter.execution = execution
+        adapter.cmd_id = 5
+        adapter.update_handle = MagicMock()
+        adapter._is_navigating = False
+        mock_api.is_command_completed.return_value = False
+
+        state = MagicMock()
+        data = RobotUpdateData(
+            robot_name='AGV-001', map_name='map1',
+            position=[1.0, 2.0, 0.0],
+            battery_soc=0.85,
+        )
+
+        adapter.update(state, data)
+
+        execution.finished.assert_not_called()
+        assert adapter.execution is execution
+
+    def test_navigate_sets_target_position(self, adapter):
+        """navigate() 호출 시 _navigate_target_position이 설정된다."""
+        dest = MagicMock()
+        dest.position = [5.0, 3.0, 0.0]
+        dest.map = 'map1'
+        execution = MagicMock()
+
+        adapter.navigate(dest, execution)
+        adapter.cancel_cmd_attempt()
+
+        assert adapter._navigate_target_position == [5.0, 3.0]
+        assert adapter._is_navigating is True
+
+    def test_execute_action_clears_navigating(self, adapter):
+        """execute_action() 호출 시 _is_navigating이 False가 된다."""
+        adapter._is_navigating = True
+        adapter._navigate_target_position = [5.0, 3.0]
+        execution = MagicMock()
+
+        adapter.execute_action('charge', {}, execution)
+        adapter.cancel_cmd_attempt()
+
+        assert adapter._is_navigating is False
+
+    def test_custom_arrival_threshold(
+        self, mock_api, mock_node,
+        sample_nav_nodes, sample_nav_edges,
+    ):
+        """커스텀 arrival_threshold가 적용된다."""
+        from vda5050_fleet_adapter.infra.nav_graph.graph_utils import (
+            create_graph,
+        )
+        graph = create_graph(sample_nav_nodes, sample_nav_edges)
+        robot = RobotAdapter(
+            name='AGV-001', api=mock_api, node=mock_node,
+            fleet_handle=MagicMock(),
+            nav_nodes=sample_nav_nodes,
+            nav_edges=sample_nav_edges,
+            nav_graph=graph,
+            arrival_threshold=1.0,
+        )
+        robot.update_handle = MagicMock()
+
+        execution = MagicMock()
+        robot.execution = execution
+        robot._is_navigating = True
+        robot._navigate_target_position = [5.0, 0.0]
+
+        state = MagicMock()
+        # dist = 0.8, within 1.0 threshold
+        data = RobotUpdateData(
+            robot_name='AGV-001', map_name='map1',
+            position=[5.8, 0.0, 0.0], battery_soc=0.85,
+        )
+
+        robot.update(state, data)
+
+        execution.finished.assert_called_once()
+
+    def test_reset_order_clears_navigate_state(self, adapter):
+        """_reset_order_state가 navigate 상태를 초기화한다."""
+        adapter._is_navigating = True
+        adapter._navigate_target_position = [5.0, 3.0]
+
+        adapter._reset_order_state()
+
+        assert adapter._is_navigating is False
+        assert adapter._navigate_target_position is None
 
 
 class TestRobotAdapterRetry:
@@ -570,8 +767,7 @@ class TestOrderLifecycle:
 
         order_id = adapter_with_handle._active_order_id
 
-        # Command 완료 시뮬레이션
-        mock_api.is_command_completed.return_value = True
+        # Navigate 완료 시뮬레이션: 거리 기반 도착
         state = MagicMock()
         data = RobotUpdateData(
             robot_name='AGV-001', map_name='map1',

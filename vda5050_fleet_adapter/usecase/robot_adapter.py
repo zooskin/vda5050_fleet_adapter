@@ -8,6 +8,7 @@ RobotAPI를 통해 VDA5050 AGV에 명령을 전달한다.
 from __future__ import annotations
 
 import logging
+import math
 import threading
 from typing import Any
 import uuid
@@ -51,6 +52,7 @@ class RobotAdapter:
         nav_nodes: dict,
         nav_edges: dict,
         nav_graph: Any,
+        arrival_threshold: float = 0.5,
     ) -> None:
         self.name = name
         self.api = api
@@ -59,12 +61,17 @@ class RobotAdapter:
         self.nav_nodes = nav_nodes
         self.nav_edges = nav_edges
         self.nav_graph = nav_graph
+        self.arrival_threshold = arrival_threshold
 
         self.execution: Any | None = None
         self.update_handle: Any | None = None
         self.configuration: Any | None = None
         self.cmd_id: int = 0
         self.position: list[float] | None = None
+
+        # Navigate 도착 판정 상태
+        self._navigate_target_position: list[float] | None = None
+        self._is_navigating: bool = False
 
         # Order 라이프사이클 관리
         self._active_order_id: str | None = None
@@ -102,9 +109,25 @@ class RobotAdapter:
         activity_identifier = None
 
         if self.execution is not None:
-            if self.api.is_command_completed(self.name, self.cmd_id):
+            completed = False
+            if self._is_navigating and self._navigate_target_position:
+                dist = math.hypot(
+                    data.position[0]
+                    - self._navigate_target_position[0],
+                    data.position[1]
+                    - self._navigate_target_position[1],
+                )
+                if dist <= self.arrival_threshold:
+                    completed = True
+            else:
+                completed = self.api.is_command_completed(
+                    self.name, self.cmd_id
+                )
+            if completed:
                 self.execution.finished()
                 self.execution = None
+                self._is_navigating = False
+                self._navigate_target_position = None
             else:
                 activity_identifier = self.execution.identifier
 
@@ -156,6 +179,8 @@ class RobotAdapter:
         """
         self.cmd_id += 1
         self.execution = execution
+        self._navigate_target_position = list(destination.position[:2])
+        self._is_navigating = True
         self.node.get_logger().info(
             f'[{self.name}] navigate callback called, '
             f'dest={destination.position}, map={destination.map}, '
@@ -460,6 +485,7 @@ class RobotAdapter:
         """
         self.cmd_id += 1
         self.execution = execution
+        self._is_navigating = False
 
         logger.info(
             'Execute action [%s]: category=%s, cmd_id=%d',
@@ -576,6 +602,9 @@ class RobotAdapter:
                 cmd=self.api.stop,
                 args=(self.name, self.cmd_id),
             )
+
+        self._navigate_target_position = None
+        self._is_navigating = False
 
         with self._planned_path_lock:
             self._rmf_planned_path = None
