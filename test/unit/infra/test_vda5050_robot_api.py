@@ -8,7 +8,7 @@ import pytest
 from vda5050_fleet_adapter.domain.entities.battery import BatteryState
 from vda5050_fleet_adapter.domain.entities.edge import Edge
 from vda5050_fleet_adapter.domain.entities.node import Node
-from vda5050_fleet_adapter.domain.enums import ActionStatus
+from vda5050_fleet_adapter.domain.enums import ActionStatus, ConnectionState
 from vda5050_fleet_adapter.domain.value_objects.position import (
     AgvPosition,
     NodePosition,
@@ -290,6 +290,108 @@ class TestOnStateMessage:
         assert cached.driving is True
 
 
+class TestConnectionState:
+    """Connection 메시지 캐시 테스트."""
+
+    def test_connection_message_updates_cache(self, api):
+        """Connection 메시지 수신 시 캐시가 업데이트된다."""
+        conn_json = json.dumps({
+            'headerId': 1,
+            'timestamp': '2026-01-01T00:00:00.000Z',
+            'version': '2.0.0',
+            'manufacturer': 'TestCo',
+            'serialNumber': 'AGV-001',
+            'connectionState': 'ONLINE',
+        })
+
+        api._on_connection_message(
+            'AGV-001', conn_json.encode('utf-8')
+        )
+
+        assert api._connection_cache['AGV-001'] == ConnectionState.ONLINE
+
+    def test_connection_cache_returns_latest_state(self, api):
+        """여러 상태 변경 시 마지막 상태를 반환한다."""
+        for state_val in ['ONLINE', 'CONNECTIONBROKEN', 'OFFLINE']:
+            conn_json = json.dumps({
+                'headerId': 1,
+                'timestamp': '2026-01-01T00:00:00.000Z',
+                'version': '2.0.0',
+                'manufacturer': 'TestCo',
+                'serialNumber': 'AGV-001',
+                'connectionState': state_val,
+            })
+            api._on_connection_message(
+                'AGV-001', conn_json.encode('utf-8')
+            )
+
+        assert api._connection_cache['AGV-001'] == ConnectionState.OFFLINE
+
+
+class TestConnectionCheck:
+    """명령 전송 전 연결 확인 테스트."""
+
+    def test_navigate_retries_when_robot_offline(self, api, mock_mqtt):
+        """OFFLINE 로봇에 navigate 시 RETRY를 반환한다."""
+        api._connection_cache['AGV-001'] = ConnectionState.OFFLINE
+        result = api.navigate('AGV-001', 1, [], [], 'map1')
+        assert result == RobotAPIResult.RETRY
+        mock_mqtt.publish.assert_not_called()
+
+    def test_navigate_retries_when_robot_connectionbroken(
+        self, api, mock_mqtt
+    ):
+        """CONNECTIONBROKEN 시 RETRY를 반환한다."""
+        api._connection_cache['AGV-001'] = ConnectionState.CONNECTIONBROKEN
+        result = api.navigate('AGV-001', 1, [], [], 'map1')
+        assert result == RobotAPIResult.RETRY
+        mock_mqtt.publish.assert_not_called()
+
+    def test_navigate_succeeds_when_robot_online(self, api, mock_mqtt):
+        """ONLINE 로봇에 navigate가 성공한다."""
+        api._connection_cache['AGV-001'] = ConnectionState.ONLINE
+        nodes = [
+            Node(
+                node_id='wp1', sequence_id=0, released=True,
+                node_position=NodePosition(x=0.0, y=0.0, map_id='map1'),
+            ),
+        ]
+        result = api.navigate('AGV-001', 1, nodes, [], 'map1')
+        assert result == RobotAPIResult.SUCCESS
+
+    def test_navigate_succeeds_when_no_connection_state(
+        self, api, mock_mqtt
+    ):
+        """연결 상태 미수신 시 명령을 허용한다."""
+        result = api.navigate(
+            'AGV-001', 1,
+            [Node(
+                node_id='wp1', sequence_id=0, released=True,
+                node_position=NodePosition(x=0.0, y=0.0, map_id='map1'),
+            )],
+            [], 'map1',
+        )
+        assert result == RobotAPIResult.SUCCESS
+
+    def test_stop_retries_when_robot_offline(self, api, mock_mqtt):
+        """OFFLINE 로봇에 stop 시 RETRY를 반환한다."""
+        api._connection_cache['AGV-001'] = ConnectionState.OFFLINE
+        result = api.stop('AGV-001', 1)
+        assert result == RobotAPIResult.RETRY
+        mock_mqtt.publish.assert_not_called()
+
+    def test_start_activity_retries_when_robot_offline(
+        self, api, mock_mqtt
+    ):
+        """OFFLINE 로봇에 activity 시 RETRY를 반환한다."""
+        api._connection_cache['AGV-001'] = ConnectionState.OFFLINE
+        result = api.start_activity(
+            'AGV-001', 1, 'charge', {'station': 'cs1'}
+        )
+        assert result == RobotAPIResult.RETRY
+        mock_mqtt.publish.assert_not_called()
+
+
 class TestSubscribeRobot:
     """subscribe_robot() 테스트."""
 
@@ -301,6 +403,18 @@ class TestSubscribeRobot:
         topics = [c[0][0] for c in mock_mqtt.subscribe.call_args_list]
         assert 'uagv/v2/TestCo/AGV-001/state' in topics
         assert 'uagv/v2/TestCo/AGV-001/connection' in topics
+
+    def test_connection_subscribes_with_qos_1(self, api, mock_mqtt):
+        """Connection 토픽이 QoS=1로 구독된다."""
+        api.subscribe_robot('AGV-001')
+
+        for call in mock_mqtt.subscribe.call_args_list:
+            topic = call[0][0]
+            if topic.endswith('/connection'):
+                assert call[1]['qos'] == 1
+                break
+        else:
+            pytest.fail('connection topic subscription not found')
 
 
 class TestBuildTopic:
