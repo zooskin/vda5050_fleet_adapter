@@ -18,7 +18,11 @@ from vda5050_fleet_adapter.domain.entities.edge import Edge
 from vda5050_fleet_adapter.domain.entities.header import Header
 from vda5050_fleet_adapter.domain.entities.node import Node
 from vda5050_fleet_adapter.domain.entities.order import Order
-from vda5050_fleet_adapter.domain.enums import ActionStatus, BlockingType
+from vda5050_fleet_adapter.domain.enums import (
+    ActionStatus,
+    BlockingType,
+    ConnectionState,
+)
 from vda5050_fleet_adapter.infra.mqtt.message_serializer import (
     deserialize_state,
     serialize_instant_actions,
@@ -65,6 +69,8 @@ class Vda5050RobotAPI(RobotAPI):
         self._completed_cmds: dict[str, set[int]] = {}
         # 토픽별 header ID 카운터
         self._header_ids: dict[str, int] = {}
+        # 로봇별 연결 상태 캐시: {robot_name: ConnectionState}
+        self._connection_cache: dict[str, ConnectionState] = {}
 
     def subscribe_robot(self, robot_name: str) -> None:
         """로봇의 MQTT 토픽을 구독한다.
@@ -84,9 +90,24 @@ class Vda5050RobotAPI(RobotAPI):
         self._mqtt.subscribe(
             connection_topic,
             lambda t, p: self._on_connection_message(robot_name, p),
-            qos=0,
+            qos=1,
         )
         logger.info('Subscribed to %s', connection_topic)
+
+    def is_robot_connected(self, robot_name: str) -> bool:
+        """로봇의 VDA5050 연결 상태가 ONLINE인지 확인한다.
+
+        연결 상태를 수신한 적이 없으면 True(연결 가정)를 반환한다.
+
+        Args:
+            robot_name: 로봇 이름.
+
+        Returns:
+            ONLINE이거나 상태 미수신이면 True, 그 외 False.
+        """
+        with self._lock:
+            state = self._connection_cache.get(robot_name)
+        return state is None or state == ConnectionState.ONLINE
 
     def connect(self) -> None:
         """MQTT 브로커에 연결한다."""
@@ -128,8 +149,13 @@ class Vda5050RobotAPI(RobotAPI):
             logger.warning('MQTT not connected, will retry navigate')
             return RobotAPIResult.RETRY
 
-        if not order_id:
-            order_id = f'order_{cmd_id}_{uuid.uuid4().hex[:8]}'
+        if not self.is_robot_connected(robot_name):
+            logger.warning(
+                'Robot %s not connected, will retry navigate', robot_name
+            )
+            return RobotAPIResult.RETRY
+
+        order_id = f'order_{cmd_id}_{uuid.uuid4().hex[:8]}'
         header = self._make_header(robot_name, 'order')
 
         order = Order(
@@ -172,6 +198,12 @@ class Vda5050RobotAPI(RobotAPI):
         """
         if not self._mqtt.is_connected:
             logger.warning('MQTT not connected, will retry stop')
+            return RobotAPIResult.RETRY
+
+        if not self.is_robot_connected(robot_name):
+            logger.warning(
+                'Robot %s not connected, will retry stop', robot_name
+            )
             return RobotAPIResult.RETRY
 
         header = self._make_header(robot_name, 'instantActions')
@@ -238,6 +270,12 @@ class Vda5050RobotAPI(RobotAPI):
         """
         if not self._mqtt.is_connected:
             logger.warning('MQTT not connected, will retry activity')
+            return RobotAPIResult.RETRY
+
+        if not self.is_robot_connected(robot_name):
+            logger.warning(
+                'Robot %s not connected, will retry activity', robot_name
+            )
             return RobotAPIResult.RETRY
 
         header = self._make_header(robot_name, 'instantActions')
@@ -397,6 +435,10 @@ class Vda5050RobotAPI(RobotAPI):
                 deserialize_connection,
             )
             connection = deserialize_connection(payload.decode('utf-8'))
+            with self._lock:
+                self._connection_cache[robot_name] = (
+                    connection.connection_state
+                )
             logger.info(
                 'Connection update: robot=%s, state=%s',
                 robot_name, connection.connection_state,
