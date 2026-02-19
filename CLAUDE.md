@@ -78,25 +78,85 @@ python -m pytest test/
 - All config values must be loadable from YAML parameters, no hardcoded values
 - Thread safety: use `threading.Lock` for shared state between MQTT callbacks and ROS 2 callbacks
 
-## VDA5050 order 생성시 지켜야할 규칙
-- order의 단위 : rmf의 한개의 Task가 하나의 order단위다 되어야한다. 예를 들어 rmf에 go_to_place명령이 들어올경우 로봇으로 전달 되는 orderID는 하나여야 한다.
-- order의 단위 예외사항 : rmf core의 기능을 통해 로봇이 다른 로봇 및 특정상황에서 기존 경로가 변경이 일어날경우 기존 order를 cancel 시키고 다른 orderid로 새로 내린다. 
-- order의 생성 범위 : order에 rmf core에서 내려온 Destination까지를 Base로 만들고, rmf core에서 받은 경로까지 Horizon에 포함 시키고, 이후에 최종 목적지까지의 경로를 Horizon으로 추가한다.
-  - destination까지 Base - rmf core에서 받은 경로까지 horizon - 나머지 최종 목적지 까지 horizon
-- order update 시 : rmf core에서 새로운 Destination이 내려오면 해당 Destination까지 Base로 만들고, rmf core에서 받은 경로까지 Horizon에 포함 시키고, 이후에 최종 목적지까지의 경로를 Horizon으로 추가한다.
-- 최종 목적지 란 : 최종목적지는, rmf core에 명령 넣은 로봇의 최종 도착지 이다. 예를 들어 ros2 run rmf_demos_tasks dispatch_go_to_place -p pantry 이렇게 터미널에서 명령을 주면 "pantry"가 최종 목적지가 된다. 
-  - cart_delivery처럼 phase가 2개 이상으로 나눠진경우, 최종목적지는 각 phase에 목적지가 된다.
-- order 예시 :
-  - 최종목적지 = 5, 로봇 출발지 1 , 중간 경유지 2,3,4
-  - rmf core에서 받은 경로가 [1,2,3,4]이고 첫번째 destination이 3이면: 1(base)-2(base)-3(base)-4(horizon, rmf경로)-5(horizon, 최종목적지까지 추가)
-  - 3번 까지 도착 후 rmf core에서 받은 경로가 [3,4,5]이고 두번째 destination이 4이면: 3(base)-4(base)-5(horizon, rmf경로)
-  - 4번 까지 도착 후 rmf core에서 받은 경로가 [4,5]이고 세번째 destination이 5이면: 4(base)-5(base)
-- order는 무조건 최종목적지까지 node가 다 있어야한다. 
-  - 만약 rmf core에서 내려온 경로가, 최종목적지까지 포함된 경로가 아니면 rmf core에서 내려온 경로까지 생성후 나머지 최종목적지까지의 경로를 Horizon으로 만들어 생성 한다.
-  - 로봇이 다음 destination에 도착 후 경로를 다시 받아서 업데이트 하기 떄문에, 나머지 최종목적지까지의 경로를 Horizon으로 만든 경로는 실제 부정확 하여도 괜찮다. 
+## VDA5050 Order 생성 규칙
 
+### Order 단위
+- rmf의 한개의 Task가 하나의 order 단위가 되어야한다. 예를 들어 rmf에 go_to_place명령이 들어올경우 로봇으로 전달 되는 orderID는 하나여야 한다.
+- 예외사항 : rmf core의 기능을 통해 로봇이 다른 로봇 및 특정상황에서 기존 경로가 변경이 일어날경우 기존 order를 cancel 시키고 다른 orderid로 새로 내린다.
 
-- negotiation 발생 시 규칙 : rmf에서 negotiation이 발생하면 아래 순서를 따른다
-  1. 발생 로봇에 startPause instantAction을 내린다.
-  2. 이후 새로운 Destination이 내려오면 로봇에 cancelOrder instantAction을 내린다.
-  3. 이후 위 order 생성 규칙을 통해 order를 생성하여 로봇을 움직인다. 단 이경우 새로운 orderID로 명령을 내린다.
+### 3-Tier 경로 생성 구조 (구현 완료)
+order 경로는 3개의 Tier로 구성된다:
+- **Tier 1 (Base)**: 현재 위치 → goal_node(destination)까지. `released=True`로 설정되어 즉시 실행.
+- **Tier 2 (Horizon - RMF 경로)**: goal_node 이후 → RMF가 제공한 경로 끝까지. `released=False`.
+- **Tier 3 (Horizon - 최종목적지 확장)**: RMF 경로 끝 → 최종 목적지까지. `released=False`. 최종목적지가 이미 경로에 포함되어 있으면 생략.
+
+order는 무조건 최종목적지까지 node가 다 있어야한다. Tier 3로 추가된 경로는 다음 destination 도착 후 재계산되므로 부정확해도 괜찮다.
+
+### 경로 데이터 소스 (구현 완료)
+- `destination.waypoint_names` 속성을 사용하여 RMF가 계산한 경로를 받는다 (planned_path topic 대신).
+- EasyFullControl C++에서 navigate() 콜백 시 전체 waypoint 시퀀스를 제공한다.
+- waypoint_names가 없거나 유효하지 않으면 `compute_path()`로 fallback.
+- **최종 목적지**: `destination.final_name` 속성으로 파악. cart_delivery처럼 phase가 2개 이상인 경우, 각 phase의 목적지가 최종 목적지가 된다.
+
+### 경로 보간 (Sparse Path Interpolation, 구현 완료)
+- RMF의 waypoint_names가 sparse할 수 있음 (예: `[1, 3, 5]` → 중간 노드 누락).
+- `_interpolate_path()` 메서드가 인접하지 않은 waypoint 쌍 사이에 `compute_path()`로 중간 노드를 채운다.
+- nav_graph에 직접 edge가 있으면 그대로 사용, 없으면 최단 경로로 보간.
+
+### 브리지 경로 (Bridge Path, 구현 완료)
+- 로봇의 현재 위치(start_node)가 RMF 경로의 시작점과 다를 경우:
+  - start_node가 rmf_path 안에 있으면 → 해당 인덱스부터 사용
+  - start_node가 rmf_path 밖이면 → `compute_path()`로 start_node → rmf_path[0] 브리지 경로 생성 후 연결
+
+### Order Update 규칙 (구현 완료)
+- 같은 Task 내에서 새로운 Destination이 내려오면 → `order_update_id++`, 같은 `order_id` 유지
+- 새로운 Task이면 → 새로운 `order_id` 생성, `order_update_id = 0`
+- Order update 시 stitching: 이전 order의 마지막 Base node의 sequenceId(`_last_stitch_seq_id`)를 다음 order의 시작점으로 사용하여 AGV가 끊김 없이 전환
+
+### SequenceId 규칙 (구현 완료)
+- Node: 짝수 sequenceId (0, 2, 4, 6, ...)
+- Edge: 홀수 sequenceId (1, 3, 5, 7, ...)
+- Order update 시 `seq_start = _last_stitch_seq_id`로 연속성 유지
+- Base/Horizon 분리: Node는 `i <= base_end_index`이면 released, Edge는 `i < base_end_index`이면 released
+
+### Order 예시
+- 최종목적지 = 5, 로봇 출발지 1, 중간 경유지 2,3,4
+- rmf core에서 받은 경로가 [1,2,3,4]이고 첫번째 destination이 3이면: 1(base)-2(base)-3(base)-4(horizon, rmf경로)-5(horizon, 최종목적지까지 추가)
+- 3번 까지 도착 후 rmf core에서 받은 경로가 [3,4,5]이고 두번째 destination이 4이면: 3(base)-4(base)-5(horizon, rmf경로)
+- 4번 까지 도착 후 rmf core에서 받은 경로가 [4,5]이고 세번째 destination이 5이면: 4(base)-5(base)
+
+## Negotiation 처리 규칙 (구현 완료)
+rmf에서 negotiation이 발생하면 아래 순서를 따른다:
+1. RMF가 `stop()` 호출 → `startPause` instantAction을 로봇에 전송, `_is_paused_for_negotiation = True`
+2. RMF가 새로운 경로로 `navigate()` 호출 → `cancelOrder` instantAction 전송
+3. 1초 대기 후 새로운 `orderID`로 order 생성하여 로봇을 움직인다.
+4. `_is_paused_for_negotiation` 플래그로 negotiation 상태를 추적하여 cancel → new order 시퀀스를 보장한다.
+
+## 도착 감지 (Arrival Detection, 구현 완료)
+- **navigate 명령**: 거리 기반 도착 감지 (`arrival_threshold`, 기본 0.5m). VDA5050 state의 position과 목적지 좌표 간 유클리드 거리가 threshold 이하이면 도착으로 판단.
+- **execute_action 명령**: VDA5050 state의 action_states에서 action_id의 상태가 FINISHED/FAILED인지 확인.
+- navigate 완료는 RMF의 책임이므로, VDA5050의 Base node 진행 상태가 아닌 거리 기반으로 빠르게 피드백.
+
+## Execute Action as NodeAction (구현 완료)
+- cart_delivery 등에서 execute_action(pickup/dropoff)이 호출될 때, 활성 order가 있으면 instantAction 대신 **order update의 nodeAction**으로 전송.
+- 현재 위치의 가장 가까운 노드에 `BlockingType.HARD` action을 붙여 order update로 전송.
+- 현재 노드만 Base(released), 최종 목적지까지의 나머지 경로는 Horizon으로 구성.
+- `track_action_id`를 사용하여 action 완료를 추적 (order_id가 아닌 action_id로 모니터링).
+
+## Robot Connection 관리 (구현 완료)
+- VDA5050 connection topic을 구독하여 로봇별 연결 상태(`ConnectionState`)를 캐싱.
+- `is_robot_connected()`: navigate 등 명령 전송 전 pre-flight check. 미연결 시 `RETRY` 반환.
+- Fleet adapter 시작 시 로봇이 연결되지 않은 상태면 RMF에 `add_robot`하지 않음.
+
+## Commission 자동 업데이트 (구현 완료)
+- VDA5050 state 기반으로 RMF commission을 자동 갱신:
+  - `OFFLINE`/`CONNECTIONBROKEN`, FATAL error, Emergency stop, Manual/Service/TeachIn mode → 전체 decommission (dispatched=false, direct=false, idle=false)
+  - `SEMIAUTOMATIC` → 부분 commission (dispatched=false, direct=true, idle=true)
+  - `AUTOMATIC` + 정상 → 전체 commission (dispatched=true, direct=true, idle=true)
+
+## Order Validation 규칙 (domain/entities/order.py)
+- order_id 비어있으면 안됨
+- nodes 비어있으면 안됨
+- Node의 sequenceId는 짝수, Edge의 sequenceId는 홀수
+- Edge의 start_node_id/end_node_id가 nodes 목록에 존재해야 함
+- Base → Horizon 순서만 허용 (Horizon 이후 Base node 불가)
