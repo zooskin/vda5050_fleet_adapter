@@ -157,7 +157,8 @@ class RobotAdapter:
         if commission_state == self._last_commission:
             return
 
-        commission = self.update_handle.commission()
+        handle = self.update_handle.more()
+        commission = handle.commission()
         commission.accept_dispatched_tasks = (
             commission_state.accept_dispatched_tasks
         )
@@ -167,7 +168,7 @@ class RobotAdapter:
         commission.perform_idle_behavior = (
             commission_state.perform_idle_behavior
         )
-        self.update_handle.set_commission(commission)
+        handle.set_commission(commission)
         self._last_commission = commission_state
 
         logger.info(
