@@ -26,6 +26,7 @@ class MqttClient:
     """
 
     def __init__(self, config: MqttConfig, client_id: str = '') -> None:
+        """Initialize."""
         self._config = config
         self._client = mqtt.Client(
             client_id=client_id,

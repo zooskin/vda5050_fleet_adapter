@@ -5,10 +5,20 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from vda5050_fleet_adapter.domain.entities.agv_state import AgvState
 from vda5050_fleet_adapter.domain.entities.battery import BatteryState
 from vda5050_fleet_adapter.domain.entities.edge import Edge
+from vda5050_fleet_adapter.domain.entities.error import AgvError
+from vda5050_fleet_adapter.domain.entities.header import Header
 from vda5050_fleet_adapter.domain.entities.node import Node
-from vda5050_fleet_adapter.domain.enums import ActionStatus, ConnectionState
+from vda5050_fleet_adapter.domain.entities.safety import SafetyState
+from vda5050_fleet_adapter.domain.enums import (
+    ActionStatus,
+    ConnectionState,
+    ErrorLevel,
+    EStopType,
+    OperatingMode,
+)
 from vda5050_fleet_adapter.domain.value_objects.position import (
     AgvPosition,
     NodePosition,
@@ -16,7 +26,10 @@ from vda5050_fleet_adapter.domain.value_objects.position import (
 from vda5050_fleet_adapter.infra.mqtt.vda5050_robot_api import (
     Vda5050RobotAPI,
 )
-from vda5050_fleet_adapter.usecase.ports.robot_api import RobotAPIResult
+from vda5050_fleet_adapter.usecase.ports.robot_api import (
+    CommissionState,
+    RobotAPIResult,
+)
 
 
 @pytest.fixture
@@ -528,3 +541,141 @@ class TestBuildTopic:
         """State 토픽 형식이 올바르다."""
         topic = api._build_topic('AGV-001', 'state')
         assert topic == 'uagv/v2/TestCo/AGV-001/state'
+
+
+def _make_agv_state(
+    operating_mode: OperatingMode = OperatingMode.AUTOMATIC,
+    errors: list[AgvError] | None = None,
+    e_stop: EStopType = EStopType.NONE,
+) -> AgvState:
+    """최소 AgvState를 생성한다."""
+    return AgvState(
+        header=Header(
+            version='2.0.0',
+            manufacturer='TestCo',
+            serial_number='AGV-001',
+        ),
+        operating_mode=operating_mode,
+        errors=errors or [],
+        safety_state=SafetyState(e_stop=e_stop),
+    )
+
+
+class TestGetCommissionState:
+    """get_commission_state() 테스트."""
+
+    def test_returns_none_without_state(self, api):
+        """상태 미수신 시 None을 반환한다."""
+        assert api.get_commission_state('AGV-001') is None
+
+    def test_commissioned_when_automatic_and_online(self, api):
+        """AUTOMATIC + ONLINE → 전체 commission."""
+        api._state_cache['AGV-001'] = _make_agv_state()
+        api._connection_cache['AGV-001'] = ConnectionState.ONLINE
+
+        result = api.get_commission_state('AGV-001')
+
+        assert result == CommissionState(True, True, True)
+
+    def test_commissioned_when_no_connection_received(self, api):
+        """Connection 미수신 시 정상 간주."""
+        api._state_cache['AGV-001'] = _make_agv_state()
+
+        result = api.get_commission_state('AGV-001')
+
+        assert result == CommissionState(True, True, True)
+
+    def test_decommissioned_when_offline(self, api):
+        """OFFLINE → 전체 decommission."""
+        api._state_cache['AGV-001'] = _make_agv_state()
+        api._connection_cache['AGV-001'] = ConnectionState.OFFLINE
+
+        result = api.get_commission_state('AGV-001')
+
+        assert result == CommissionState(False, False, False)
+
+    def test_decommissioned_when_connectionbroken(self, api):
+        """CONNECTIONBROKEN → 전체 decommission."""
+        api._state_cache['AGV-001'] = _make_agv_state()
+        api._connection_cache['AGV-001'] = ConnectionState.CONNECTIONBROKEN
+
+        result = api.get_commission_state('AGV-001')
+
+        assert result == CommissionState(False, False, False)
+
+    def test_decommissioned_when_manual_mode(self, api):
+        """MANUAL → 전체 decommission."""
+        api._state_cache['AGV-001'] = _make_agv_state(
+            operating_mode=OperatingMode.MANUAL,
+        )
+
+        result = api.get_commission_state('AGV-001')
+
+        assert result == CommissionState(False, False, False)
+
+    def test_decommissioned_when_service_mode(self, api):
+        """SERVICE → 전체 decommission."""
+        api._state_cache['AGV-001'] = _make_agv_state(
+            operating_mode=OperatingMode.SERVICE,
+        )
+
+        result = api.get_commission_state('AGV-001')
+
+        assert result == CommissionState(False, False, False)
+
+    def test_decommissioned_when_teachin_mode(self, api):
+        """TEACHIN → 전체 decommission."""
+        api._state_cache['AGV-001'] = _make_agv_state(
+            operating_mode=OperatingMode.TEACHIN,
+        )
+
+        result = api.get_commission_state('AGV-001')
+
+        assert result == CommissionState(False, False, False)
+
+    def test_decommissioned_when_fatal_error(self, api):
+        """FATAL error → 전체 decommission."""
+        api._state_cache['AGV-001'] = _make_agv_state(
+            errors=[AgvError(
+                error_type='hw_fail',
+                error_level=ErrorLevel.FATAL,
+            )],
+        )
+
+        result = api.get_commission_state('AGV-001')
+
+        assert result == CommissionState(False, False, False)
+
+    def test_decommissioned_when_estop(self, api):
+        """Emergency stop active → 전체 decommission."""
+        api._state_cache['AGV-001'] = _make_agv_state(
+            e_stop=EStopType.MANUAL,
+        )
+
+        result = api.get_commission_state('AGV-001')
+
+        assert result == CommissionState(False, False, False)
+
+    def test_partial_when_semiautomatic(self, api):
+        """SEMIAUTOMATIC → dispatch만 false."""
+        api._state_cache['AGV-001'] = _make_agv_state(
+            operating_mode=OperatingMode.SEMIAUTOMATIC,
+        )
+
+        result = api.get_commission_state('AGV-001')
+
+        assert result == CommissionState(False, True, True)
+
+    def test_decommission_overrides_semiautomatic_with_fatal(self, api):
+        """SEMIAUTOMATIC + FATAL → 전체 decommission."""
+        api._state_cache['AGV-001'] = _make_agv_state(
+            operating_mode=OperatingMode.SEMIAUTOMATIC,
+            errors=[AgvError(
+                error_type='hw_fail',
+                error_level=ErrorLevel.FATAL,
+            )],
+        )
+
+        result = api.get_commission_state('AGV-001')
+
+        assert result == CommissionState(False, False, False)

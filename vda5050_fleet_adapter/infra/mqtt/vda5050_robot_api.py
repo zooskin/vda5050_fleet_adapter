@@ -22,6 +22,7 @@ from vda5050_fleet_adapter.domain.enums import (
     ActionStatus,
     BlockingType,
     ConnectionState,
+    OperatingMode,
 )
 from vda5050_fleet_adapter.infra.mqtt.message_serializer import (
     deserialize_state,
@@ -30,6 +31,7 @@ from vda5050_fleet_adapter.infra.mqtt.message_serializer import (
 )
 from vda5050_fleet_adapter.infra.mqtt.mqtt_client import MqttClient
 from vda5050_fleet_adapter.usecase.ports.robot_api import (
+    CommissionState,
     RobotAPI,
     RobotAPIResult,
     RobotUpdateData,
@@ -56,6 +58,7 @@ class Vda5050RobotAPI(RobotAPI):
         prefix: str,
         manufacturer: str = '',
     ) -> None:
+        """Initialize."""
         self._mqtt = mqtt_client
         self._prefix = prefix
         self._manufacturer = manufacturer
@@ -155,7 +158,8 @@ class Vda5050RobotAPI(RobotAPI):
             )
             return RobotAPIResult.RETRY
 
-        order_id = f'order_{cmd_id}_{uuid.uuid4().hex[:8]}'
+        if not order_id:
+            order_id = f'order_{cmd_id}_{uuid.uuid4().hex[:8]}'
         header = self._make_header(robot_name, 'order')
 
         order = Order(
@@ -345,6 +349,55 @@ class Vda5050RobotAPI(RobotAPI):
             position=position,
             battery_soc=battery_soc,
         )
+
+    def get_commission_state(
+        self, robot_name: str
+    ) -> CommissionState | None:
+        """VDA5050 상태 기반 commission 상태를 반환한다.
+
+        operating_mode, errors, safety_state, connection_state를 종합하여
+        RMF commission 설정을 결정한다.
+
+        Args:
+            robot_name: 로봇 이름.
+
+        Returns:
+            commission 상태 또는 상태 미수신 시 None.
+        """
+        with self._lock:
+            state = self._state_cache.get(robot_name)
+            conn = self._connection_cache.get(robot_name)
+
+        if state is None:
+            return None
+
+        # Decommission 조건 (우선 평가)
+        # 1. 연결 끊김
+        if conn in (ConnectionState.OFFLINE, ConnectionState.CONNECTIONBROKEN):
+            return CommissionState(False, False, False)
+
+        # 2. FATAL 에러
+        if state.has_fatal_error:
+            return CommissionState(False, False, False)
+
+        # 3. 비상정지
+        if state.is_emergency_stopped:
+            return CommissionState(False, False, False)
+
+        # 4. 수동 모드
+        if state.operating_mode in (
+            OperatingMode.MANUAL,
+            OperatingMode.SERVICE,
+            OperatingMode.TEACHIN,
+        ):
+            return CommissionState(False, False, False)
+
+        # Partial commission: SEMIAUTOMATIC
+        if state.operating_mode == OperatingMode.SEMIAUTOMATIC:
+            return CommissionState(False, True, True)
+
+        # Full commission: AUTOMATIC + 정상
+        return CommissionState(True, True, True)
 
     def is_command_completed(
         self, robot_name: str, cmd_id: int

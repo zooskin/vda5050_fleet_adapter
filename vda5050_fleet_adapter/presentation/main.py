@@ -64,6 +64,8 @@ def _update_robot(robot: RobotAdapter) -> None:
         robot.node.get_logger().info(
             f'[{robot.name}] adding robot to fleet_handle...'
         )
+        if not robot.api.is_robot_connected(robot.name):
+            return
         robot.update_handle = robot.fleet_handle.add_robot(
             robot.name,
             state,

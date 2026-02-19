@@ -54,6 +54,7 @@ class RobotAdapter:
         nav_graph: Any,
         arrival_threshold: float = 0.5,
     ) -> None:
+        """Initialize."""
         self.name = name
         self.api = api
         self.node = node
@@ -90,6 +91,9 @@ class RobotAdapter:
         self._last_nodes: list[list] = []
         self._last_stitch_seq_id: int = 0  # 마지막 Base 노드의 sequenceId
         self._last_map: str | None = None  # 마지막 navigate의 맵 이름
+
+        # Commission 상태 추적
+        self._last_commission: Any | None = None
 
     def update(self, state: Any, data: RobotUpdateData) -> None:
         """주기적 상태 업데이트.
@@ -143,6 +147,38 @@ class RobotAdapter:
 
         if self.update_handle is not None:
             self.update_handle.update(state, activity_identifier)
+            self._update_commission()
+
+    def _update_commission(self) -> None:
+        """VDA5050 상태 기반으로 RMF commission을 업데이트한다."""
+        commission_state = self.api.get_commission_state(self.name)
+        if commission_state is None:
+            return
+
+        if commission_state == self._last_commission:
+            return
+
+        handle = self.update_handle.more()
+        commission = handle.commission()
+        commission.accept_dispatched_tasks = (
+            commission_state.accept_dispatched_tasks
+        )
+        commission.accept_direct_tasks = (
+            commission_state.accept_direct_tasks
+        )
+        commission.perform_idle_behavior = (
+            commission_state.perform_idle_behavior
+        )
+        handle.set_commission(commission)
+        self._last_commission = commission_state
+
+        logger.info(
+            'Commission updated [%s]: dispatch=%s, direct=%s, idle=%s',
+            self.name,
+            commission_state.accept_dispatched_tasks,
+            commission_state.accept_direct_tasks,
+            commission_state.perform_idle_behavior,
+        )
 
     def make_callbacks(self) -> Any:
         """RMF RobotCallbacks를 생성한다.
@@ -316,13 +352,13 @@ class RobotAdapter:
         if path is None:
             path = [start_node, target]
 
-        # ── Step 2: 3-tier 경로 구성 ──
-        # tier 1 (Base):    path[0 : base_end_index+1]
-        # tier 2 (Horizon): path[base_end_index+1 : rmf_path_end+1]
-        # tier 3 (Horizon): path[rmf_path_end+1 :]
+        # ── Step 2: 3-tier 경로 구성 (경로 조립 관점) ──
+        # tier 1 (Horizon - RMF 경로):      path[0 : rmf_path_end+1]
+        # tier 2 (Horizon - 최종목적지 확장): path[rmf_path_end+1 :]
+        # tier 3 (Base):                    path[0 : base_end_index+1]
         rmf_path_end = len(path) - 1
 
-        # Tier 3 확장: path에 최종목적지가 없으면
+        # Tier 2 확장: path에 최종목적지가 없으면
         # 현재 경로 끝에서 최종목적지까지의 경로를 Horizon으로 추가
         if (
             target
@@ -335,7 +371,7 @@ class RobotAdapter:
             if extension and len(extension) > 1:
                 path = path + extension[1:]
                 logger.info(
-                    'Tier3 extension for %s: %s -> %s '
+                    'Tier2 extension for %s: %s -> %s '
                     '(appended %s)',
                     self.name, extension[0],
                     target, extension[1:],
@@ -357,12 +393,12 @@ class RobotAdapter:
 
         logger.info(
             'Navigate [%s] 3-tier path: '
-            'Base(tier1)=%s, Horizon-RMF(tier2)=%s, '
-            'Horizon-ext(tier3)=%s',
+            'Horizon-RMF(tier1)=%s, Horizon-ext(tier2)=%s, '
+            'Base(tier3)=%s',
             self.name,
-            path[:base_end_index + 1],
-            path[base_end_index + 1:rmf_path_end + 1],
+            path[:rmf_path_end + 1],
             path[rmf_path_end + 1:],
+            path[:base_end_index + 1],
         )
 
         # ── Step 3: VDA5050 Node/Edge 생성 ──

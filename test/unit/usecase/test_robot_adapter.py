@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from vda5050_fleet_adapter.usecase.ports.robot_api import (
+    CommissionState,
     RobotAPIResult,
     RobotUpdateData,
 )
@@ -436,6 +437,79 @@ class TestRobotAdapterUpdate:
         adapter.update(state, data)
 
         assert adapter.position == [3.0, 4.0, 1.5]
+
+    def test_update_sets_commission_on_state_change(
+        self, adapter, mock_api
+    ):
+        """Commission 상태 변경 시 set_commission이 호출된다."""
+        update_handle = MagicMock()
+        more_handle = MagicMock()
+        commission_obj = MagicMock()
+        more_handle.commission.return_value = commission_obj
+        update_handle.more.return_value = more_handle
+        adapter.update_handle = update_handle
+
+        mock_api.get_commission_state.return_value = CommissionState(
+            False, False, False
+        )
+
+        state = MagicMock()
+        data = RobotUpdateData(
+            robot_name='AGV-001',
+            map_name='map1',
+            position=[1.0, 2.0, 0.0],
+            battery_soc=0.85,
+        )
+
+        adapter.update(state, data)
+
+        more_handle.commission.assert_called_once()
+        more_handle.set_commission.assert_called_once_with(commission_obj)
+        assert adapter._last_commission == CommissionState(
+            False, False, False
+        )
+
+    def test_update_skips_commission_when_unchanged(
+        self, adapter, mock_api
+    ):
+        """동일 commission 상태 시 set_commission이 호출되지 않는다."""
+        update_handle = MagicMock()
+        adapter.update_handle = update_handle
+
+        commission = CommissionState(True, True, True)
+        mock_api.get_commission_state.return_value = commission
+        adapter._last_commission = commission
+
+        state = MagicMock()
+        data = RobotUpdateData(
+            robot_name='AGV-001',
+            map_name='map1',
+            position=[1.0, 2.0, 0.0],
+            battery_soc=0.85,
+        )
+
+        adapter.update(state, data)
+
+        update_handle.set_commission.assert_not_called()
+
+    def test_update_skips_commission_when_none(self, adapter, mock_api):
+        """Commission None 시 set_commission이 호출되지 않는다."""
+        update_handle = MagicMock()
+        adapter.update_handle = update_handle
+
+        mock_api.get_commission_state.return_value = None
+
+        state = MagicMock()
+        data = RobotUpdateData(
+            robot_name='AGV-001',
+            map_name='map1',
+            position=[1.0, 2.0, 0.0],
+            battery_soc=0.85,
+        )
+
+        adapter.update(state, data)
+
+        update_handle.set_commission.assert_not_called()
 
 
 class TestDistanceBasedArrival:

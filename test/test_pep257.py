@@ -12,15 +12,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
+
 from ament_pep257.main import main
 import pytest
+
+_PKG_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 @pytest.mark.linter
 @pytest.mark.pep257
 def test_pep257():
-    rc = main(argv=[
-        '--add-ignore', 'D213', 'D406', 'D407', 'D413',
-        '.', 'test',
-    ])
+    prev = os.getcwd()
+    os.chdir(_PKG_DIR)
+    try:
+        rc = main(argv=[
+            '--add-ignore', 'D213', 'D406', 'D407', 'D413',
+        ])
+    finally:
+        os.chdir(prev)
     assert rc == 0, 'Found code style errors / warnings'
