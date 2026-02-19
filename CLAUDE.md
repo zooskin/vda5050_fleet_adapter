@@ -85,12 +85,13 @@ python -m pytest test/
 - 예외사항 : rmf core의 기능을 통해 로봇이 다른 로봇 및 특정상황에서 기존 경로가 변경이 일어날경우 기존 order를 cancel 시키고 다른 orderid로 새로 내린다.
 
 ### 3-Tier 경로 생성 구조 (구현 완료)
-order 경로는 3개의 Tier로 구성된다:
-- **Tier 1 (Base)**: 현재 위치 → goal_node(destination)까지. `released=True`로 설정되어 즉시 실행.
-- **Tier 2 (Horizon - RMF 경로)**: goal_node 이후 → RMF가 제공한 경로 끝까지. `released=False`.
-- **Tier 3 (Horizon - 최종목적지 확장)**: RMF 경로 끝 → 최종 목적지까지. `released=False`. 최종목적지가 이미 경로에 포함되어 있으면 생략.
+order 경로는 3개의 Tier로 구성된다 (경로 조립 관점):
+- **Tier 1 (Horizon - RMF 경로)**: 현재 위치 → RMF가 제공한 경로 끝까지. `released=False`.
+- **Tier 2 (Horizon - 최종목적지 확장)**: RMF 경로 끝 → 최종 목적지까지. `released=False`. 최종목적지가 이미 경로에 포함되어 있으면 생략.
+- **Tier 3 (Base)**: 현재 위치 → goal_node(destination)까지. `released=True`로 설정되어 즉시 실행.
 
-order는 무조건 최종목적지까지 node가 다 있어야한다. Tier 3로 추가된 경로는 다음 destination 도착 후 재계산되므로 부정확해도 괜찮다.
+최종 VDA5050 order에서는 Base(Tier 3)가 앞, Horizon(Tier 1, 2)이 뒤에 배치된다.
+order는 무조건 최종목적지까지 node가 다 있어야한다. Tier 2로 추가된 경로는 다음 destination 도착 후 재계산되므로 부정확해도 괜찮다.
 
 ### 경로 데이터 소스 (구현 완료)
 - `destination.waypoint_names` 속성을 사용하여 RMF가 계산한 경로를 받는다 (planned_path topic 대신).
