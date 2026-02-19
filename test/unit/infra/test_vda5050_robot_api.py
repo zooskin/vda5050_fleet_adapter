@@ -5,10 +5,20 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from vda5050_fleet_adapter.domain.entities.agv_state import AgvState
 from vda5050_fleet_adapter.domain.entities.battery import BatteryState
 from vda5050_fleet_adapter.domain.entities.edge import Edge
+from vda5050_fleet_adapter.domain.entities.error import AgvError
+from vda5050_fleet_adapter.domain.entities.header import Header
 from vda5050_fleet_adapter.domain.entities.node import Node
-from vda5050_fleet_adapter.domain.enums import ActionStatus
+from vda5050_fleet_adapter.domain.entities.safety import SafetyState
+from vda5050_fleet_adapter.domain.enums import (
+    ActionStatus,
+    ConnectionState,
+    ErrorLevel,
+    EStopType,
+    OperatingMode,
+)
 from vda5050_fleet_adapter.domain.value_objects.position import (
     AgvPosition,
     NodePosition,
@@ -16,7 +26,10 @@ from vda5050_fleet_adapter.domain.value_objects.position import (
 from vda5050_fleet_adapter.infra.mqtt.vda5050_robot_api import (
     Vda5050RobotAPI,
 )
-from vda5050_fleet_adapter.usecase.ports.robot_api import RobotAPIResult
+from vda5050_fleet_adapter.usecase.ports.robot_api import (
+    CommissionState,
+    RobotAPIResult,
+)
 
 
 @pytest.fixture
@@ -100,6 +113,55 @@ class TestNavigate:
         api.navigate('AGV-001', 42, nodes, [], 'map1')
         assert 42 in api._cmd_order_map.get('AGV-001', {})
 
+    def test_navigate_uses_provided_order_id(self, api, mock_mqtt):
+        """제공된 order_id를 사용한다."""
+        nodes = [
+            Node(
+                node_id='wp1', sequence_id=0, released=True,
+                node_position=NodePosition(x=0.0, y=0.0, map_id='map1'),
+            ),
+        ]
+        result = api.navigate(
+            'AGV-001', 1, nodes, [], 'map1',
+            order_id='custom_order_123',
+        )
+
+        assert result == RobotAPIResult.SUCCESS
+        payload = mock_mqtt.publish.call_args[0][1]
+        data = json.loads(payload)
+        assert data['orderId'] == 'custom_order_123'
+
+    def test_navigate_auto_generates_order_id_when_empty(self, api, mock_mqtt):
+        """order_id가 빈 문자열이면 자동 생성한다."""
+        nodes = [
+            Node(
+                node_id='wp1', sequence_id=0, released=True,
+                node_position=NodePosition(x=0.0, y=0.0, map_id='map1'),
+            ),
+        ]
+        api.navigate('AGV-001', 5, nodes, [], 'map1', order_id='')
+
+        payload = mock_mqtt.publish.call_args[0][1]
+        data = json.loads(payload)
+        assert data['orderId'].startswith('order_5_')
+
+    def test_navigate_uses_provided_order_update_id(self, api, mock_mqtt):
+        """order_update_id가 payload에 반영된다."""
+        nodes = [
+            Node(
+                node_id='wp1', sequence_id=0, released=True,
+                node_position=NodePosition(x=0.0, y=0.0, map_id='map1'),
+            ),
+        ]
+        api.navigate(
+            'AGV-001', 1, nodes, [], 'map1',
+            order_id='order_1_abc', order_update_id=3,
+        )
+
+        payload = mock_mqtt.publish.call_args[0][1]
+        data = json.loads(payload)
+        assert data['orderUpdateId'] == 3
+
 
 class TestStop:
     """stop() 테스트."""
@@ -121,6 +183,36 @@ class TestStop:
         mock_mqtt.is_connected = False
         result = api.stop('AGV-001', 1)
         assert result == RobotAPIResult.RETRY
+
+
+class TestPause:
+    """pause() 테스트."""
+
+    def test_pause_publishes_start_pause(self, api, mock_mqtt):
+        """pause가 startPause instant action을 발행한다."""
+        result = api.pause('AGV-001', 1)
+
+        assert result == RobotAPIResult.SUCCESS
+        mock_mqtt.publish.assert_called_once()
+        topic = mock_mqtt.publish.call_args[0][0]
+        assert topic == 'uagv/v2/TestCo/AGV-001/instantActions'
+        payload = mock_mqtt.publish.call_args[0][1]
+        data = json.loads(payload)
+        assert data['actions'][0]['actionType'] == 'startPause'
+
+    def test_pause_retries_when_disconnected(self, api, mock_mqtt):
+        """MQTT 미연결 시 RETRY를 반환한다."""
+        mock_mqtt.is_connected = False
+        result = api.pause('AGV-001', 1)
+        assert result == RobotAPIResult.RETRY
+
+    def test_pause_action_has_hard_blocking(self, api, mock_mqtt):
+        """Start-pause action이 HARD blocking type이다."""
+        api.pause('AGV-001', 1)
+
+        payload = mock_mqtt.publish.call_args[0][1]
+        data = json.loads(payload)
+        assert data['actions'][0]['blockingType'] == 'HARD'
 
 
 class TestStartActivity:
@@ -202,19 +294,39 @@ class TestIsCommandCompleted:
 
         assert not api.is_command_completed('AGV-001', 1)
 
-    def test_order_not_completed_when_nodes_remain(self, api):
-        """남은 노드가 있으면 미완료."""
+    def test_order_not_completed_when_released_nodes_remain(self, api):
+        """Released(base) 노드가 남아있으면 미완료."""
         order_id = 'order_1_abc'
         api._cmd_order_map['AGV-001'] = {1: order_id}
 
+        released_node = MagicMock()
+        released_node.released = True
         state = MagicMock()
         state.order_id = order_id
-        state.node_states = [MagicMock()]
+        state.node_states = [released_node]
         state.driving = False
         state.action_states = []
         api._state_cache['AGV-001'] = state
 
         assert not api.is_command_completed('AGV-001', 1)
+
+    def test_order_completed_with_only_horizon_nodes(self, api):
+        """Horizon 노드만 남고 driving=False이면 완료."""
+        order_id = 'order_1_abc'
+        api._cmd_order_map['AGV-001'] = {1: order_id}
+
+        horizon_node1 = MagicMock()
+        horizon_node1.released = False
+        horizon_node2 = MagicMock()
+        horizon_node2.released = False
+        state = MagicMock()
+        state.order_id = order_id
+        state.node_states = [horizon_node1, horizon_node2]
+        state.driving = False
+        state.action_states = []
+        api._state_cache['AGV-001'] = state
+
+        assert api.is_command_completed('AGV-001', 1)
 
     def test_action_completed_when_finished(self, api):
         """Action status가 FINISHED이면 완료."""
@@ -290,6 +402,108 @@ class TestOnStateMessage:
         assert cached.driving is True
 
 
+class TestConnectionState:
+    """Connection 메시지 캐시 테스트."""
+
+    def test_connection_message_updates_cache(self, api):
+        """Connection 메시지 수신 시 캐시가 업데이트된다."""
+        conn_json = json.dumps({
+            'headerId': 1,
+            'timestamp': '2026-01-01T00:00:00.000Z',
+            'version': '2.0.0',
+            'manufacturer': 'TestCo',
+            'serialNumber': 'AGV-001',
+            'connectionState': 'ONLINE',
+        })
+
+        api._on_connection_message(
+            'AGV-001', conn_json.encode('utf-8')
+        )
+
+        assert api._connection_cache['AGV-001'] == ConnectionState.ONLINE
+
+    def test_connection_cache_returns_latest_state(self, api):
+        """여러 상태 변경 시 마지막 상태를 반환한다."""
+        for state_val in ['ONLINE', 'CONNECTIONBROKEN', 'OFFLINE']:
+            conn_json = json.dumps({
+                'headerId': 1,
+                'timestamp': '2026-01-01T00:00:00.000Z',
+                'version': '2.0.0',
+                'manufacturer': 'TestCo',
+                'serialNumber': 'AGV-001',
+                'connectionState': state_val,
+            })
+            api._on_connection_message(
+                'AGV-001', conn_json.encode('utf-8')
+            )
+
+        assert api._connection_cache['AGV-001'] == ConnectionState.OFFLINE
+
+
+class TestConnectionCheck:
+    """명령 전송 전 연결 확인 테스트."""
+
+    def test_navigate_retries_when_robot_offline(self, api, mock_mqtt):
+        """OFFLINE 로봇에 navigate 시 RETRY를 반환한다."""
+        api._connection_cache['AGV-001'] = ConnectionState.OFFLINE
+        result = api.navigate('AGV-001', 1, [], [], 'map1')
+        assert result == RobotAPIResult.RETRY
+        mock_mqtt.publish.assert_not_called()
+
+    def test_navigate_retries_when_robot_connectionbroken(
+        self, api, mock_mqtt
+    ):
+        """CONNECTIONBROKEN 시 RETRY를 반환한다."""
+        api._connection_cache['AGV-001'] = ConnectionState.CONNECTIONBROKEN
+        result = api.navigate('AGV-001', 1, [], [], 'map1')
+        assert result == RobotAPIResult.RETRY
+        mock_mqtt.publish.assert_not_called()
+
+    def test_navigate_succeeds_when_robot_online(self, api, mock_mqtt):
+        """ONLINE 로봇에 navigate가 성공한다."""
+        api._connection_cache['AGV-001'] = ConnectionState.ONLINE
+        nodes = [
+            Node(
+                node_id='wp1', sequence_id=0, released=True,
+                node_position=NodePosition(x=0.0, y=0.0, map_id='map1'),
+            ),
+        ]
+        result = api.navigate('AGV-001', 1, nodes, [], 'map1')
+        assert result == RobotAPIResult.SUCCESS
+
+    def test_navigate_succeeds_when_no_connection_state(
+        self, api, mock_mqtt
+    ):
+        """연결 상태 미수신 시 명령을 허용한다."""
+        result = api.navigate(
+            'AGV-001', 1,
+            [Node(
+                node_id='wp1', sequence_id=0, released=True,
+                node_position=NodePosition(x=0.0, y=0.0, map_id='map1'),
+            )],
+            [], 'map1',
+        )
+        assert result == RobotAPIResult.SUCCESS
+
+    def test_stop_retries_when_robot_offline(self, api, mock_mqtt):
+        """OFFLINE 로봇에 stop 시 RETRY를 반환한다."""
+        api._connection_cache['AGV-001'] = ConnectionState.OFFLINE
+        result = api.stop('AGV-001', 1)
+        assert result == RobotAPIResult.RETRY
+        mock_mqtt.publish.assert_not_called()
+
+    def test_start_activity_retries_when_robot_offline(
+        self, api, mock_mqtt
+    ):
+        """OFFLINE 로봇에 activity 시 RETRY를 반환한다."""
+        api._connection_cache['AGV-001'] = ConnectionState.OFFLINE
+        result = api.start_activity(
+            'AGV-001', 1, 'charge', {'station': 'cs1'}
+        )
+        assert result == RobotAPIResult.RETRY
+        mock_mqtt.publish.assert_not_called()
+
+
 class TestSubscribeRobot:
     """subscribe_robot() 테스트."""
 
@@ -301,6 +515,18 @@ class TestSubscribeRobot:
         topics = [c[0][0] for c in mock_mqtt.subscribe.call_args_list]
         assert 'uagv/v2/TestCo/AGV-001/state' in topics
         assert 'uagv/v2/TestCo/AGV-001/connection' in topics
+
+    def test_connection_subscribes_with_qos_1(self, api, mock_mqtt):
+        """Connection 토픽이 QoS=1로 구독된다."""
+        api.subscribe_robot('AGV-001')
+
+        for call in mock_mqtt.subscribe.call_args_list:
+            topic = call[0][0]
+            if topic.endswith('/connection'):
+                assert call[1]['qos'] == 1
+                break
+        else:
+            pytest.fail('connection topic subscription not found')
 
 
 class TestBuildTopic:
@@ -315,3 +541,141 @@ class TestBuildTopic:
         """State 토픽 형식이 올바르다."""
         topic = api._build_topic('AGV-001', 'state')
         assert topic == 'uagv/v2/TestCo/AGV-001/state'
+
+
+def _make_agv_state(
+    operating_mode: OperatingMode = OperatingMode.AUTOMATIC,
+    errors: list[AgvError] | None = None,
+    e_stop: EStopType = EStopType.NONE,
+) -> AgvState:
+    """최소 AgvState를 생성한다."""
+    return AgvState(
+        header=Header(
+            version='2.0.0',
+            manufacturer='TestCo',
+            serial_number='AGV-001',
+        ),
+        operating_mode=operating_mode,
+        errors=errors or [],
+        safety_state=SafetyState(e_stop=e_stop),
+    )
+
+
+class TestGetCommissionState:
+    """get_commission_state() 테스트."""
+
+    def test_returns_none_without_state(self, api):
+        """상태 미수신 시 None을 반환한다."""
+        assert api.get_commission_state('AGV-001') is None
+
+    def test_commissioned_when_automatic_and_online(self, api):
+        """AUTOMATIC + ONLINE → 전체 commission."""
+        api._state_cache['AGV-001'] = _make_agv_state()
+        api._connection_cache['AGV-001'] = ConnectionState.ONLINE
+
+        result = api.get_commission_state('AGV-001')
+
+        assert result == CommissionState(True, True, True)
+
+    def test_commissioned_when_no_connection_received(self, api):
+        """Connection 미수신 시 정상 간주."""
+        api._state_cache['AGV-001'] = _make_agv_state()
+
+        result = api.get_commission_state('AGV-001')
+
+        assert result == CommissionState(True, True, True)
+
+    def test_decommissioned_when_offline(self, api):
+        """OFFLINE → 전체 decommission."""
+        api._state_cache['AGV-001'] = _make_agv_state()
+        api._connection_cache['AGV-001'] = ConnectionState.OFFLINE
+
+        result = api.get_commission_state('AGV-001')
+
+        assert result == CommissionState(False, False, False)
+
+    def test_decommissioned_when_connectionbroken(self, api):
+        """CONNECTIONBROKEN → 전체 decommission."""
+        api._state_cache['AGV-001'] = _make_agv_state()
+        api._connection_cache['AGV-001'] = ConnectionState.CONNECTIONBROKEN
+
+        result = api.get_commission_state('AGV-001')
+
+        assert result == CommissionState(False, False, False)
+
+    def test_decommissioned_when_manual_mode(self, api):
+        """MANUAL → 전체 decommission."""
+        api._state_cache['AGV-001'] = _make_agv_state(
+            operating_mode=OperatingMode.MANUAL,
+        )
+
+        result = api.get_commission_state('AGV-001')
+
+        assert result == CommissionState(False, False, False)
+
+    def test_decommissioned_when_service_mode(self, api):
+        """SERVICE → 전체 decommission."""
+        api._state_cache['AGV-001'] = _make_agv_state(
+            operating_mode=OperatingMode.SERVICE,
+        )
+
+        result = api.get_commission_state('AGV-001')
+
+        assert result == CommissionState(False, False, False)
+
+    def test_decommissioned_when_teachin_mode(self, api):
+        """TEACHIN → 전체 decommission."""
+        api._state_cache['AGV-001'] = _make_agv_state(
+            operating_mode=OperatingMode.TEACHIN,
+        )
+
+        result = api.get_commission_state('AGV-001')
+
+        assert result == CommissionState(False, False, False)
+
+    def test_decommissioned_when_fatal_error(self, api):
+        """FATAL error → 전체 decommission."""
+        api._state_cache['AGV-001'] = _make_agv_state(
+            errors=[AgvError(
+                error_type='hw_fail',
+                error_level=ErrorLevel.FATAL,
+            )],
+        )
+
+        result = api.get_commission_state('AGV-001')
+
+        assert result == CommissionState(False, False, False)
+
+    def test_decommissioned_when_estop(self, api):
+        """Emergency stop active → 전체 decommission."""
+        api._state_cache['AGV-001'] = _make_agv_state(
+            e_stop=EStopType.MANUAL,
+        )
+
+        result = api.get_commission_state('AGV-001')
+
+        assert result == CommissionState(False, False, False)
+
+    def test_partial_when_semiautomatic(self, api):
+        """SEMIAUTOMATIC → dispatch만 false."""
+        api._state_cache['AGV-001'] = _make_agv_state(
+            operating_mode=OperatingMode.SEMIAUTOMATIC,
+        )
+
+        result = api.get_commission_state('AGV-001')
+
+        assert result == CommissionState(False, True, True)
+
+    def test_decommission_overrides_semiautomatic_with_fatal(self, api):
+        """SEMIAUTOMATIC + FATAL → 전체 decommission."""
+        api._state_cache['AGV-001'] = _make_agv_state(
+            operating_mode=OperatingMode.SEMIAUTOMATIC,
+            errors=[AgvError(
+                error_type='hw_fail',
+                error_level=ErrorLevel.FATAL,
+            )],
+        )
+
+        result = api.get_commission_state('AGV-001')
+
+        assert result == CommissionState(False, False, False)

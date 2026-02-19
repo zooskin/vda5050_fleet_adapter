@@ -31,17 +31,20 @@ rmf_fleet:
     loop: True
     delivery: True
     clean: False
-  actions: ["teleop"]
+  actions: ["teleop", "delivery_pickup", "delivery_dropoff"]
   finishing_request: "park"
   robots:
-    AGV-001:
-      charger: "charger_1"
+    AGV_001:
+      charger: "tinyRobot1_charger"
+    AGV_002:
+      charger: "tinyRobot2_charger"
   robot_state_update_frequency: 10.0
+  arrival_threshold: 0.5            # meters, distance-based arrival detection
 
 # MQTT / VDA5050 CONFIG ========================================================
 fleet_manager:
   ip: "127.0.0.1"
-  prefix: "uagv/v2/manufacturer"   # MQTT topic prefix
+  prefix: "uagv/v2/RobotCompany"   # MQTT topic prefix
   port: 1883
   user: ""
   password: ""

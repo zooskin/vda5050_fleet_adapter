@@ -18,7 +18,12 @@ from vda5050_fleet_adapter.domain.entities.edge import Edge
 from vda5050_fleet_adapter.domain.entities.header import Header
 from vda5050_fleet_adapter.domain.entities.node import Node
 from vda5050_fleet_adapter.domain.entities.order import Order
-from vda5050_fleet_adapter.domain.enums import ActionStatus, BlockingType
+from vda5050_fleet_adapter.domain.enums import (
+    ActionStatus,
+    BlockingType,
+    ConnectionState,
+    OperatingMode,
+)
 from vda5050_fleet_adapter.infra.mqtt.message_serializer import (
     deserialize_state,
     serialize_instant_actions,
@@ -26,6 +31,7 @@ from vda5050_fleet_adapter.infra.mqtt.message_serializer import (
 )
 from vda5050_fleet_adapter.infra.mqtt.mqtt_client import MqttClient
 from vda5050_fleet_adapter.usecase.ports.robot_api import (
+    CommissionState,
     RobotAPI,
     RobotAPIResult,
     RobotUpdateData,
@@ -52,6 +58,7 @@ class Vda5050RobotAPI(RobotAPI):
         prefix: str,
         manufacturer: str = '',
     ) -> None:
+        """Initialize."""
         self._mqtt = mqtt_client
         self._prefix = prefix
         self._manufacturer = manufacturer
@@ -65,6 +72,8 @@ class Vda5050RobotAPI(RobotAPI):
         self._completed_cmds: dict[str, set[int]] = {}
         # 토픽별 header ID 카운터
         self._header_ids: dict[str, int] = {}
+        # 로봇별 연결 상태 캐시: {robot_name: ConnectionState}
+        self._connection_cache: dict[str, ConnectionState] = {}
 
     def subscribe_robot(self, robot_name: str) -> None:
         """로봇의 MQTT 토픽을 구독한다.
@@ -84,9 +93,24 @@ class Vda5050RobotAPI(RobotAPI):
         self._mqtt.subscribe(
             connection_topic,
             lambda t, p: self._on_connection_message(robot_name, p),
-            qos=0,
+            qos=1,
         )
         logger.info('Subscribed to %s', connection_topic)
+
+    def is_robot_connected(self, robot_name: str) -> bool:
+        """로봇의 VDA5050 연결 상태가 ONLINE인지 확인한다.
+
+        연결 상태를 수신한 적이 없으면 True(연결 가정)를 반환한다.
+
+        Args:
+            robot_name: 로봇 이름.
+
+        Returns:
+            ONLINE이거나 상태 미수신이면 True, 그 외 False.
+        """
+        with self._lock:
+            state = self._connection_cache.get(robot_name)
+        return state is None or state == ConnectionState.ONLINE
 
     def connect(self) -> None:
         """MQTT 브로커에 연결한다."""
@@ -103,6 +127,10 @@ class Vda5050RobotAPI(RobotAPI):
         nodes: list[Node],
         edges: list[Edge],
         map_name: str,
+        order_id: str = '',
+        order_update_id: int = 0,
+        *,
+        track_action_id: str | None = None,
     ) -> RobotAPIResult:
         """VDA5050 Order를 전송하여 내비게이션을 시작한다.
 
@@ -112,6 +140,10 @@ class Vda5050RobotAPI(RobotAPI):
             nodes: VDA5050 Node 목록.
             edges: VDA5050 Edge 목록.
             map_name: 대상 맵 이름.
+            order_id: 외부 지정 Order ID (빈 문자열이면 자동 생성).
+            order_update_id: Order update 카운터.
+            track_action_id: nodeAction의 action_id. 제공 시 완료 추적에
+                order_id 대신 action_id를 사용한다.
 
         Returns:
             명령 결과.
@@ -120,13 +152,20 @@ class Vda5050RobotAPI(RobotAPI):
             logger.warning('MQTT not connected, will retry navigate')
             return RobotAPIResult.RETRY
 
-        order_id = f'order_{cmd_id}_{uuid.uuid4().hex[:8]}'
+        if not self.is_robot_connected(robot_name):
+            logger.warning(
+                'Robot %s not connected, will retry navigate', robot_name
+            )
+            return RobotAPIResult.RETRY
+
+        if not order_id:
+            order_id = f'order_{cmd_id}_{uuid.uuid4().hex[:8]}'
         header = self._make_header(robot_name, 'order')
 
         order = Order(
             header=header,
             order_id=order_id,
-            order_update_id=0,
+            order_update_id=order_update_id,
             nodes=nodes,
             edges=edges,
         )
@@ -135,17 +174,19 @@ class Vda5050RobotAPI(RobotAPI):
         topic = self._build_topic(robot_name, 'order')
         self._mqtt.publish(topic, payload, qos=0)
 
+        track_id = track_action_id if track_action_id else order_id
         with self._lock:
             if robot_name not in self._cmd_order_map:
                 self._cmd_order_map[robot_name] = {}
-            self._cmd_order_map[robot_name][cmd_id] = order_id
+            self._cmd_order_map[robot_name][cmd_id] = track_id
             if robot_name not in self._completed_cmds:
                 self._completed_cmds[robot_name] = set()
 
         logger.info(
             'Navigate order sent: robot=%s, cmd_id=%d, order_id=%s, '
-            'nodes=%d, edges=%d',
-            robot_name, cmd_id, order_id, len(nodes), len(edges),
+            'track_id=%s, nodes=%d, edges=%d',
+            robot_name, cmd_id, order_id, track_id,
+            len(nodes), len(edges),
         )
         return RobotAPIResult.SUCCESS
 
@@ -163,6 +204,12 @@ class Vda5050RobotAPI(RobotAPI):
             logger.warning('MQTT not connected, will retry stop')
             return RobotAPIResult.RETRY
 
+        if not self.is_robot_connected(robot_name):
+            logger.warning(
+                'Robot %s not connected, will retry stop', robot_name
+            )
+            return RobotAPIResult.RETRY
+
         header = self._make_header(robot_name, 'instantActions')
         action = Action(
             action_type='cancelOrder',
@@ -175,6 +222,36 @@ class Vda5050RobotAPI(RobotAPI):
         self._mqtt.publish(topic, payload, qos=0)
 
         logger.info('Stop (cancelOrder) sent: robot=%s', robot_name)
+        return RobotAPIResult.SUCCESS
+
+    def pause(self, robot_name: str, cmd_id: int) -> RobotAPIResult:
+        """Start-pause instant action을 전송한다.
+
+        Negotiation 발생 시 로봇을 일시정지시키기 위해 사용한다.
+
+        Args:
+            robot_name: 로봇 이름.
+            cmd_id: 명령 ID.
+
+        Returns:
+            명령 결과.
+        """
+        if not self._mqtt.is_connected:
+            logger.warning('MQTT not connected, will retry pause')
+            return RobotAPIResult.RETRY
+
+        header = self._make_header(robot_name, 'instantActions')
+        action = Action(
+            action_type='startPause',
+            action_id=f'pause_{cmd_id}_{uuid.uuid4().hex[:8]}',
+            blocking_type=BlockingType.HARD,
+        )
+
+        payload = serialize_instant_actions(header, [action])
+        topic = self._build_topic(robot_name, 'instantActions')
+        self._mqtt.publish(topic, payload, qos=0)
+
+        logger.info('Pause (startPause) sent: robot=%s', robot_name)
         return RobotAPIResult.SUCCESS
 
     def start_activity(
@@ -197,6 +274,12 @@ class Vda5050RobotAPI(RobotAPI):
         """
         if not self._mqtt.is_connected:
             logger.warning('MQTT not connected, will retry activity')
+            return RobotAPIResult.RETRY
+
+        if not self.is_robot_connected(robot_name):
+            logger.warning(
+                'Robot %s not connected, will retry activity', robot_name
+            )
             return RobotAPIResult.RETRY
 
         header = self._make_header(robot_name, 'instantActions')
@@ -267,6 +350,55 @@ class Vda5050RobotAPI(RobotAPI):
             battery_soc=battery_soc,
         )
 
+    def get_commission_state(
+        self, robot_name: str
+    ) -> CommissionState | None:
+        """VDA5050 상태 기반 commission 상태를 반환한다.
+
+        operating_mode, errors, safety_state, connection_state를 종합하여
+        RMF commission 설정을 결정한다.
+
+        Args:
+            robot_name: 로봇 이름.
+
+        Returns:
+            commission 상태 또는 상태 미수신 시 None.
+        """
+        with self._lock:
+            state = self._state_cache.get(robot_name)
+            conn = self._connection_cache.get(robot_name)
+
+        if state is None:
+            return None
+
+        # Decommission 조건 (우선 평가)
+        # 1. 연결 끊김
+        if conn in (ConnectionState.OFFLINE, ConnectionState.CONNECTIONBROKEN):
+            return CommissionState(False, False, False)
+
+        # 2. FATAL 에러
+        if state.has_fatal_error:
+            return CommissionState(False, False, False)
+
+        # 3. 비상정지
+        if state.is_emergency_stopped:
+            return CommissionState(False, False, False)
+
+        # 4. 수동 모드
+        if state.operating_mode in (
+            OperatingMode.MANUAL,
+            OperatingMode.SERVICE,
+            OperatingMode.TEACHIN,
+        ):
+            return CommissionState(False, False, False)
+
+        # Partial commission: SEMIAUTOMATIC
+        if state.operating_mode == OperatingMode.SEMIAUTOMATIC:
+            return CommissionState(False, True, True)
+
+        # Full commission: AUTOMATIC + 정상
+        return CommissionState(True, True, True)
+
     def is_command_completed(
         self, robot_name: str, cmd_id: int
     ) -> bool:
@@ -296,10 +428,15 @@ class Vda5050RobotAPI(RobotAPI):
         if state is None or order_or_action_id is None:
             return False
 
-        # Order 완료 확인: nodeStates가 비어있고 driving=False
+        # Order 완료 확인: released(base) 노드가 없고 driving=False
+        # Horizon 노드는 nodeStates에 남아있을 수 있으므로
+        # released 노드만 확인한다.
         if order_or_action_id.startswith('order_'):
             if state.order_id == order_or_action_id:
-                if not state.node_states and not state.driving:
+                has_released = any(
+                    ns.released for ns in state.node_states
+                )
+                if not has_released and not state.driving:
                     with self._lock:
                         self._completed_cmds.setdefault(
                             robot_name, set()
@@ -333,13 +470,10 @@ class Vda5050RobotAPI(RobotAPI):
     ) -> None:
         """State 토픽 콜백."""
         try:
-            state = deserialize_state(payload.decode('utf-8'))
+            raw = payload.decode('utf-8')
+            state = deserialize_state(raw)
             with self._lock:
                 self._state_cache[robot_name] = state
-            logger.debug(
-                'State received: robot=%s, order=%s, driving=%s',
-                robot_name, state.order_id, state.driving,
-            )
         except Exception:
             logger.exception(
                 'Failed to deserialize state: robot=%s', robot_name
@@ -354,6 +488,10 @@ class Vda5050RobotAPI(RobotAPI):
                 deserialize_connection,
             )
             connection = deserialize_connection(payload.decode('utf-8'))
+            with self._lock:
+                self._connection_cache[robot_name] = (
+                    connection.connection_state
+                )
             logger.info(
                 'Connection update: robot=%s, state=%s',
                 robot_name, connection.connection_state,

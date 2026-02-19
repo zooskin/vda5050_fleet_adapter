@@ -12,14 +12,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
+
 from ament_flake8.main import main_with_errors
 import pytest
+
+_PKG_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 @pytest.mark.flake8
 @pytest.mark.linter
 def test_flake8():
-    rc, errors = main_with_errors(argv=[])
+    prev = os.getcwd()
+    os.chdir(_PKG_DIR)
+    try:
+        rc, errors = main_with_errors(argv=[])
+    finally:
+        os.chdir(prev)
     assert rc == 0, \
         'Found %d code style errors / warnings:\n' % len(errors) + \
         '\n'.join(errors)

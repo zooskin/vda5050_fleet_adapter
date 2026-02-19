@@ -26,6 +26,7 @@ class MqttClient:
     """
 
     def __init__(self, config: MqttConfig, client_id: str = '') -> None:
+        """Initialize."""
         self._config = config
         self._client = mqtt.Client(
             client_id=client_id,
@@ -43,7 +44,9 @@ class MqttClient:
             max_delay=config.reconnect_max_delay_sec,
         )
 
-        self._subscriptions: dict[str, Callable[[str, bytes], None]] = {}
+        self._subscriptions: dict[
+            str, tuple[Callable[[str, bytes], None], int]
+        ] = {}
 
     @property
     def is_connected(self) -> bool:
@@ -117,7 +120,7 @@ class MqttClient:
             qos: QoS 레벨.
         """
         with self._lock:
-            self._subscriptions[topic] = callback
+            self._subscriptions[topic] = (callback, qos)
             if self._connected:
                 self._client.subscribe(topic, qos=qos)
                 logger.debug('MQTT subscribed: %s (qos=%d)', topic, qos)
@@ -144,11 +147,13 @@ class MqttClient:
         if rc == 0:
             self._connected = True
             logger.info('MQTT connected to broker')
-            # 재연결 시 기존 구독 복원
+            # 재연결 시 기존 구독 복원 (저장된 QoS 사용)
             with self._lock:
-                for topic in self._subscriptions:
-                    self._client.subscribe(topic)
-                    logger.debug('MQTT re-subscribed: %s', topic)
+                for topic, (_cb, qos) in self._subscriptions.items():
+                    self._client.subscribe(topic, qos=qos)
+                    logger.debug(
+                        'MQTT re-subscribed: %s (qos=%d)', topic, qos
+                    )
         else:
             logger.error('MQTT connection failed: rc=%d', rc)
 
@@ -174,7 +179,8 @@ class MqttClient:
     ) -> None:
         """메시지 수신 콜백."""
         with self._lock:
-            callback = self._subscriptions.get(msg.topic)
+            entry = self._subscriptions.get(msg.topic)
+            callback = entry[0] if entry is not None else None
 
         if callback is not None:
             try:
