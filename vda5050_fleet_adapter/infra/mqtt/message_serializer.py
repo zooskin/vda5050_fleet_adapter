@@ -71,6 +71,7 @@ _SPECIAL_SNAKE_TO_CAMEL: dict[str, str] = {
     'e_stop': 'eStop',
     'vx': 'vx',
     'vy': 'vy',
+    'allowed_deviation_xy': 'allowedDeviationXY',
 }
 
 _SPECIAL_CAMEL_TO_SNAKE: dict[str, str] = {

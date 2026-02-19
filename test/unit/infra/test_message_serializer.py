@@ -42,7 +42,7 @@ class TestCaseConversion:
             ('order_id', 'orderId'),
             ('node_position', 'nodePosition'),
             ('max_speed', 'maxSpeed'),
-            ('allowed_deviation_xy', 'allowedDeviationXy'),
+            ('allowed_deviation_xy', 'allowedDeviationXY'),
             ('e_stop', 'eStop'),
             ('vx', 'vx'),
         ],
