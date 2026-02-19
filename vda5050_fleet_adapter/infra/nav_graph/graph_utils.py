@@ -15,7 +15,13 @@ import networkx as nx
 import nudged
 from vda5050_fleet_adapter.domain.entities.edge import Edge
 from vda5050_fleet_adapter.domain.entities.node import Node
+from vda5050_fleet_adapter.domain.enums import CorridorRefPoint
+from vda5050_fleet_adapter.domain.value_objects.physical import Corridor
 from vda5050_fleet_adapter.domain.value_objects.position import NodePosition
+from vda5050_fleet_adapter.domain.value_objects.trajectory import (
+    ControlPoint,
+    Trajectory,
+)
 import yaml
 
 logger = logging.getLogger(__name__)
@@ -275,6 +281,7 @@ def build_vda5050_nodes_edges(
     map_id: str,
     seq_start: int = 0,
     base_end_index: int | None = None,
+    edges: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[list[Node], list[Edge]]:
     """경로에서 VDA5050 Node/Edge 목록을 생성한다.
 
@@ -289,12 +296,20 @@ def build_vda5050_nodes_edges(
         seq_start: 시작 시퀀스 번호.
         base_end_index: 마지막 Base 노드의 path 인덱스.
             None이면 모든 노드를 Base로 설정 (기존 동작).
+        edges: nav graph 엣지 dict (속성 포함). None이면 속성 미적용.
 
     Returns:
         (vda_nodes, vda_edges) 튜플.
     """
     if base_end_index is None:
         base_end_index = len(path) - 1
+
+    # Edge 속성 룩업 인덱스: {(start, end): attributes}
+    edge_lookup: dict[tuple[str, str], dict] = {}
+    if edges is not None:
+        for edge_data in edges.values():
+            key = (edge_data['start'], edge_data['end'])
+            edge_lookup[key] = edge_data.get('attributes', {})
 
     vda_nodes: list[Node] = []
     vda_edges: list[Edge] = []
@@ -303,6 +318,11 @@ def build_vda5050_nodes_edges(
         seq = seq_start + i * 2
         nd = nodes[node_name]
         released = (i <= base_end_index)
+
+        # Node 속성: allowedDeviationXY
+        attrs = nd.get('attributes', {})
+        allowed_dev = attrs.get('allowedDeviationXY')
+
         vda_nodes.append(
             Node(
                 node_id=node_name,
@@ -312,6 +332,7 @@ def build_vda5050_nodes_edges(
                     x=nd['x'],
                     y=nd['y'],
                     map_id=map_id,
+                    allowed_deviation_xy=allowed_dev,
                 ),
             )
         )
@@ -320,6 +341,38 @@ def build_vda5050_nodes_edges(
         seq = seq_start + i * 2 + 1
         edge_id = f'{path[i]}_{path[i + 1]}_{uuid.uuid4().hex[:8]}'
         released = (i < base_end_index)
+
+        # Edge 속성 룩업
+        edge_attrs = edge_lookup.get((path[i], path[i + 1]), {})
+
+        # corridor 파싱
+        corridor = None
+        if 'corridor' in edge_attrs:
+            c = edge_attrs['corridor']
+            corridor = Corridor(
+                left_width=c['leftWidth'],
+                right_width=c['rightWidth'],
+                corridor_ref_point=CorridorRefPoint(
+                    c.get('corridorRefPoint', 'KINEMATICCENTER')
+                ),
+            )
+
+        # trajectory 파싱
+        trajectory = None
+        if 'trajectory' in edge_attrs:
+            t = edge_attrs['trajectory']
+            trajectory = Trajectory(
+                degree=t['degree'],
+                knot_vector=tuple(t.get('knotVector', [])),
+                control_points=tuple(
+                    ControlPoint(
+                        x=cp['x'], y=cp['y'],
+                        weight=cp.get('weight', 1.0),
+                    )
+                    for cp in t.get('controlPoints', [])
+                ),
+            )
+
         vda_edges.append(
             Edge(
                 edge_id=edge_id,
@@ -327,6 +380,10 @@ def build_vda5050_nodes_edges(
                 released=released,
                 start_node_id=path[i],
                 end_node_id=path[i + 1],
+                max_speed=edge_attrs.get('maxSpeed'),
+                rotation_allowed=edge_attrs.get('rotationAllowed'),
+                corridor=corridor,
+                trajectory=trajectory,
             )
         )
 

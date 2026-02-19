@@ -371,3 +371,110 @@ class TestApplyTransformations:
         assert abs(nodes['a']['y'] - 20.0) < 1e-10
         assert abs(nodes['b']['x'] - 11.0) < 1e-10
         assert abs(nodes['b']['y'] - 20.0) < 1e-10
+
+
+class TestBuildVda5050NavGraphProperties:
+    """build_vda5050_nodes_edges()에 nav_graph 속성 반영 테스트."""
+
+    def test_node_allowed_deviation_xy(self):
+        """노드의 allowedDeviationXY가 NodePosition에 반영된다."""
+        nav_nodes = {
+            'wp1': {
+                'x': 0.0, 'y': 0.0,
+                'attributes': {'allowedDeviationXY': 0.3},
+            },
+            'wp2': {
+                'x': 5.0, 'y': 0.0,
+                'attributes': {},
+            },
+        }
+        vda_nodes, _ = build_vda5050_nodes_edges(
+            ['wp1', 'wp2'], nav_nodes, 'map1',
+        )
+
+        assert vda_nodes[0].node_position.allowed_deviation_xy == 0.3
+        assert vda_nodes[1].node_position.allowed_deviation_xy is None
+
+    def test_edge_properties_from_nav_edges(self):
+        """nav_edges의 maxSpeed/rotationAllowed/corridor가 Edge에 반영된다."""
+        nav_nodes = {
+            'wp1': {'x': 0.0, 'y': 0.0, 'attributes': {}},
+            'wp2': {'x': 5.0, 'y': 0.0, 'attributes': {}},
+        }
+        nav_edges = {
+            'edge0': {
+                'start': 'wp1', 'end': 'wp2',
+                'attributes': {
+                    'maxSpeed': 1.5,
+                    'rotationAllowed': False,
+                    'corridor': {
+                        'leftWidth': 0.5,
+                        'rightWidth': 0.5,
+                        'corridorRefPoint': 'CONTOUR',
+                    },
+                },
+            },
+        }
+        _, vda_edges = build_vda5050_nodes_edges(
+            ['wp1', 'wp2'], nav_nodes, 'map1', edges=nav_edges,
+        )
+
+        assert len(vda_edges) == 1
+        e = vda_edges[0]
+        assert e.max_speed == 1.5
+        assert e.rotation_allowed is False
+        assert e.corridor is not None
+        assert e.corridor.left_width == 0.5
+        assert e.corridor.right_width == 0.5
+        from vda5050_fleet_adapter.domain.enums import CorridorRefPoint
+        assert e.corridor.corridor_ref_point == CorridorRefPoint.CONTOUR
+
+    def test_edge_trajectory_from_nav_edges(self):
+        """nav_edges의 trajectory가 Edge에 반영된다."""
+        nav_nodes = {
+            'wp1': {'x': 0.0, 'y': 0.0, 'attributes': {}},
+            'wp2': {'x': 5.0, 'y': 0.0, 'attributes': {}},
+        }
+        nav_edges = {
+            'edge0': {
+                'start': 'wp1', 'end': 'wp2',
+                'attributes': {
+                    'trajectory': {
+                        'degree': 3,
+                        'knotVector': [0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+                        'controlPoints': [
+                            {'x': 0.0, 'y': 0.0, 'weight': 1.0},
+                            {'x': 2.5, 'y': 1.0},
+                            {'x': 5.0, 'y': 0.0, 'weight': 1.0},
+                        ],
+                    },
+                },
+            },
+        }
+        _, vda_edges = build_vda5050_nodes_edges(
+            ['wp1', 'wp2'], nav_nodes, 'map1', edges=nav_edges,
+        )
+
+        e = vda_edges[0]
+        assert e.trajectory is not None
+        assert e.trajectory.degree == 3
+        assert len(e.trajectory.knot_vector) == 6
+        assert len(e.trajectory.control_points) == 3
+        assert e.trajectory.control_points[1].x == 2.5
+        assert e.trajectory.control_points[1].weight == 1.0
+
+    def test_edge_no_nav_edges_defaults_none(self):
+        """edges=None이면 모든 Edge 속성이 None이다."""
+        nav_nodes = {
+            'wp1': {'x': 0.0, 'y': 0.0, 'attributes': {}},
+            'wp2': {'x': 5.0, 'y': 0.0, 'attributes': {}},
+        }
+        _, vda_edges = build_vda5050_nodes_edges(
+            ['wp1', 'wp2'], nav_nodes, 'map1', edges=None,
+        )
+
+        e = vda_edges[0]
+        assert e.max_speed is None
+        assert e.rotation_allowed is None
+        assert e.corridor is None
+        assert e.trajectory is None
