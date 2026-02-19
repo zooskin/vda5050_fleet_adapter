@@ -157,7 +157,8 @@ class Vda5050RobotAPI(RobotAPI):
             )
             return RobotAPIResult.RETRY
 
-        order_id = f'order_{cmd_id}_{uuid.uuid4().hex[:8]}'
+        if not order_id:
+            order_id = f'order_{cmd_id}_{uuid.uuid4().hex[:8]}'
         header = self._make_header(robot_name, 'order')
 
         order = Order(
