@@ -54,6 +54,7 @@ class RobotAdapter:
         nav_graph: Any,
         arrival_threshold: float = 0.5,
     ) -> None:
+        """Initialize."""
         self.name = name
         self.api = api
         self.node = node

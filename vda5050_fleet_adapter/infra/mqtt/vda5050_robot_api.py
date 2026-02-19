@@ -58,6 +58,7 @@ class Vda5050RobotAPI(RobotAPI):
         prefix: str,
         manufacturer: str = '',
     ) -> None:
+        """Initialize."""
         self._mqtt = mqtt_client
         self._prefix = prefix
         self._manufacturer = manufacturer
