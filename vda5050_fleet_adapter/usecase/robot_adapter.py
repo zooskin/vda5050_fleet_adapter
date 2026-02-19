@@ -415,6 +415,7 @@ class RobotAdapter:
             path, self.nav_nodes, map_name,
             base_end_index=base_end_index,
             seq_start=seq_start,
+            edges=self.nav_edges,
         )
 
         # 다음 order update를 위해 stitching sequenceId 저장
@@ -601,6 +602,7 @@ class RobotAdapter:
             path, self.nav_nodes, map_name,
             base_end_index=0,
             seq_start=seq_start,
+            edges=self.nav_edges,
         )
 
         # Base 노드에 action 첨부
