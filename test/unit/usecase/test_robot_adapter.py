@@ -443,8 +443,10 @@ class TestRobotAdapterUpdate:
     ):
         """Commission 상태 변경 시 set_commission이 호출된다."""
         update_handle = MagicMock()
+        more_handle = MagicMock()
         commission_obj = MagicMock()
-        update_handle.commission.return_value = commission_obj
+        more_handle.commission.return_value = commission_obj
+        update_handle.more.return_value = more_handle
         adapter.update_handle = update_handle
 
         mock_api.get_commission_state.return_value = CommissionState(
@@ -461,8 +463,8 @@ class TestRobotAdapterUpdate:
 
         adapter.update(state, data)
 
-        update_handle.commission.assert_called_once()
-        update_handle.set_commission.assert_called_once_with(commission_obj)
+        more_handle.commission.assert_called_once()
+        more_handle.set_commission.assert_called_once_with(commission_obj)
         assert adapter._last_commission == CommissionState(
             False, False, False
         )
