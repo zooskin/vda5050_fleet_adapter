@@ -20,10 +20,12 @@ levels:
     lanes:
     - - 0
       - 1
-      - {maxSpeed: 1.0, rotationAllowed: true, corridor: {leftWidth: 0.5, rightWidth: 0.5}}
+      - {maxSpeed: 1.0, rotationAllowed: true, corridor: {leftWidth: 0.5, rightWidth: 0.5,
+          corridorRefPoint: CONTOUR}}
     - - 1
       - 0
-      - {maxSpeed: 1.0, rotationAllowed: true, corridor: {leftWidth: 0.5, rightWidth: 0.5}}
+      - {maxSpeed: 1.0, rotationAllowed: true, corridor: {leftWidth: 0.5, rightWidth: 0.5,
+          corridorRefPoint: CONTOUR}}
     - - 2
       - 3
       - {maxSpeed: 0.5, rotationAllowed: true,
@@ -145,11 +147,11 @@ levels:
     - - 6
       - 23
       - {door_name: coe_door, maxSpeed: 0.3, rotationAllowed: false,
-        corridor: {leftWidth: 0.3, rightWidth: 0.3}}
+        corridor: {leftWidth: 0.3, rightWidth: 0.3, corridorRefPoint: CONTOUR}}
     - - 23
       - 6
       - {door_name: coe_door, maxSpeed: 0.3, rotationAllowed: false,
-        corridor: {leftWidth: 0.3, rightWidth: 0.3}}
+        corridor: {leftWidth: 0.3, rightWidth: 0.3, corridorRefPoint: CONTOUR}}
     - - 23
       - 24
       - {}
@@ -171,11 +173,11 @@ levels:
     - - 10
       - 26
       - {door_name: hardware_door, maxSpeed: 0.3, rotationAllowed: false,
-        corridor: {leftWidth: 0.4, rightWidth: 0.4}}
+        corridor: {leftWidth: 0.4, rightWidth: 0.4, corridorRefPoint: CONTOUR}}
     - - 26
       - 10
       - {door_name: hardware_door, maxSpeed: 0.3, rotationAllowed: false,
-        corridor: {leftWidth: 0.4, rightWidth: 0.4}}
+        corridor: {leftWidth: 0.4, rightWidth: 0.4, corridorRefPoint: CONTOUR}}
     - - 26
       - 27
       - {}
