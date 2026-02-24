@@ -194,6 +194,9 @@ def main(argv: list[str] | None = None) -> None:
     arrival_threshold = config_yaml.get('rmf_fleet', {}).get(
         'arrival_threshold', 0.5
     )
+    recharge_soc = config_yaml.get('rmf_fleet', {}).get(
+        'recharge_soc', 1.0
+    )
     node.get_logger().info(f'known_robots: {fleet_config.known_robots}')
     robots: dict[str, RobotAdapter] = {}
     for robot_name in fleet_config.known_robots:
@@ -215,6 +218,7 @@ def main(argv: list[str] | None = None) -> None:
             nav_edges=nav_edges,
             nav_graph=nav_graph,
             arrival_threshold=arrival_threshold,
+            recharge_soc=recharge_soc,
         )
         robot.configuration = robot_config
         robots[robot_name] = robot

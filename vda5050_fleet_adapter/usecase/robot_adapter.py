@@ -19,6 +19,7 @@ from vda5050_fleet_adapter.infra.nav_graph.graph_utils import (
     find_nearest_node,
 )
 from vda5050_fleet_adapter.usecase.ports.robot_api import (
+    CommissionState,
     RobotAPI,
     RobotAPIResult,
     RobotUpdateData,
@@ -53,6 +54,7 @@ class RobotAdapter:
         nav_edges: dict,
         nav_graph: Any,
         arrival_threshold: float = 0.5,
+        recharge_soc: float = 1.0,
     ) -> None:
         """Initialize."""
         self.name = name
@@ -63,6 +65,7 @@ class RobotAdapter:
         self.nav_edges = nav_edges
         self.nav_graph = nav_graph
         self.arrival_threshold = arrival_threshold
+        self.recharge_soc = recharge_soc
 
         self.execution: Any | None = None
         self.update_handle: Any | None = None
@@ -93,6 +96,7 @@ class RobotAdapter:
         self._charging_station_name: str | None = None
         self._charging_action_id: str | None = None
         self._was_charging: bool = False          # 다음 order에 stopCharging 필요
+        self._is_charging_decommissioned: bool = False  # 충전 중 decommission
 
         # 경로 캐시
         self._last_nodes: list[list] = []
@@ -125,6 +129,7 @@ class RobotAdapter:
                 )
                 if completed:
                     self._was_charging = True
+                    self._is_charging_decommissioned = True
             elif self._is_navigating and self._navigate_target_position:
                 dist = math.hypot(
                     data.position[0]
@@ -180,6 +185,7 @@ class RobotAdapter:
         if self.update_handle is not None:
             self.update_handle.update(state, activity_identifier)
             self._update_commission()
+            self._apply_charging_decommission(data.battery_soc)
 
     def _update_commission(self) -> None:
         """VDA5050 상태 기반으로 RMF commission을 업데이트한다."""
@@ -210,6 +216,46 @@ class RobotAdapter:
             commission_state.accept_dispatched_tasks,
             commission_state.accept_direct_tasks,
             commission_state.perform_idle_behavior,
+        )
+
+    def _apply_charging_decommission(
+        self, battery_soc: float,
+    ) -> None:
+        """충전 중 SOC 기반 decommission/recommission을 적용한다.
+
+        startCharging 완료 후 SOC가 recharge_soc에 도달할 때까지
+        로봇을 decommission 상태로 유지한다.
+
+        Args:
+            battery_soc: 현재 배터리 SOC (0.0~1.0).
+        """
+        if not self._is_charging_decommissioned:
+            return
+
+        if battery_soc >= self.recharge_soc:
+            self._is_charging_decommissioned = False
+            self._last_commission = None
+            logger.info(
+                'Charging recommission [%s]: SOC %.2f >= %.2f',
+                self.name, battery_soc, self.recharge_soc,
+            )
+            return
+
+        decommission = CommissionState(False, False, False)
+        if self._last_commission == decommission:
+            return
+
+        handle = self.update_handle.more()
+        commission = handle.commission()
+        commission.accept_dispatched_tasks = False
+        commission.accept_direct_tasks = False
+        commission.perform_idle_behavior = False
+        handle.set_commission(commission)
+        self._last_commission = decommission
+
+        logger.info(
+            'Charging decommission [%s]: SOC %.2f < %.2f',
+            self.name, battery_soc, self.recharge_soc,
         )
 
     def make_callbacks(self) -> Any:
@@ -509,6 +555,7 @@ class RobotAdapter:
                     self.name, stop_action.action_id,
                 )
                 self._was_charging = False
+                self._is_charging_decommissioned = False
 
             # startCharging: 마지막 base 노드에 부착
             if self._is_charging_pending:
@@ -637,6 +684,7 @@ class RobotAdapter:
                 # 충전 중이면 다음 order에 stopCharging 부착 예약
                 if self._is_charging:
                     self._was_charging = True
+                    self._is_charging_decommissioned = False
                     self._is_charging = False
                     self._is_charging_pending = False
                     self._charging_station_name = None

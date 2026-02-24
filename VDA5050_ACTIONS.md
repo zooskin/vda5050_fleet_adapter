@@ -237,17 +237,24 @@ Phase 3: startCharging action 완료 대기 (update() 루프)
   → _is_charging == True 상태에서 is_command_completed() 감시
   → startCharging action FINISHED (= 도킹 완료 + 충전 시작):
     → _was_charging = True (다음 order에 stopCharging 필요)
+    → _is_charging_decommissioned = True (SOC 도달까지 decommission)
     → execution.finished() 호출
     → 충전 task 완료
 
-Phase 4: 로봇 대기 (RMF idle 상태)
-  → 로봇은 charger에서 자율적으로 충전 계속
-  → _reset_order_state() 호출되어도 _was_charging은 보존
+Phase 4: 충전 중 decommission (update() 루프)
+  → _is_charging_decommissioned == True 상태
+  → battery_soc < recharge_soc → decommission 유지
+    (dispatched=False, direct=False, idle=False → Task 할당 차단)
+  → battery_soc >= recharge_soc → recommission
+    (_is_charging_decommissioned = False, _last_commission = None)
+    → 다음 update에서 API-level commission 재평가
+  → _reset_order_state() 호출되어도 _was_charging,
+    _is_charging_decommissioned은 보존
 
 Phase 5: 다음 order (RMF가 새 task 생성 시)
   → navigate() 호출 시 _was_charging == True 감지
   → 첫 번째 노드에 stopCharging nodeAction 부착
-  → _was_charging = False로 초기화
+  → _was_charging = False, _is_charging_decommissioned = False로 초기화
   ┌──────────────────────────────────────────────────────────┐
   │ Order (새 task)                                          │
   │   wp3(base, actions=[stopCharging{HARD}]) → ... → dest  │
@@ -263,12 +270,14 @@ Task 완료 → _reset_order_state()
 - `_navigate_target_position`을 pre-charger 좌표로 변경하여 도착 판정 기준 조정
 - pre-charger 도착 시 `_is_charging = True`로 전환
 - `is_command_completed()`로 startCharging action FINISHED 감지 → `execution.finished()`
-- `_was_charging` 플래그는 `_reset_order_state()`에서 초기화되지 않음 (다음 task에 전달)
+- `_was_charging`, `_is_charging_decommissioned` 플래그는 `_reset_order_state()`에서 초기화되지 않음
 - 다음 navigate 호출 시 `_was_charging == True`이면 첫 번째 노드에 `stopCharging` 부착
+- 충전 중 decommission: `_is_charging_decommissioned`가 True이면 `battery_soc >= recharge_soc`까지 decommission 유지
+- `recharge_soc`는 config.yaml의 `rmf_fleet.recharge_soc`에서 로드 (기본값 1.0)
 
 예외 처리:
-- 충전 중 negotiation (`stop()`) → `_was_charging = True` 설정 → `startPause` → `cancelOrder` → 새 order에 `stopCharging` 부착
-- `_reset_order_state()` 호출 시 `_was_charging`을 제외한 모든 충전 상태 초기화
+- 충전 중 negotiation (`stop()`) → `_was_charging = True`, `_is_charging_decommissioned = False` → `startPause` → `cancelOrder` → 새 order에 `stopCharging` 부착
+- `_reset_order_state()` 호출 시 `_was_charging`, `_is_charging_decommissioned`을 제외한 모든 충전 상태 초기화
 
 ---
 

@@ -2716,3 +2716,268 @@ class TestCharging:
         ]
         assert len(stop_actions) == 1
         assert charging_adapter._was_charging is False
+
+
+class TestChargingDecommission:
+    """충전 중 decommission / SOC 기반 recommission 테스트.
+
+    startCharging 완료 후 SOC가 recharge_soc에 도달할 때까지
+    로봇을 decommission 상태로 유지하여 Task 할당을 차단한다.
+    """
+
+    @pytest.fixture
+    def charging_adapter(self, mock_api, mock_node):
+        """Charger 노드가 포함된 어댑터 (recharge_soc=0.8)."""
+        from vda5050_fleet_adapter.infra.nav_graph.graph_utils import (
+            create_graph,
+        )
+        nodes = {
+            'wp1': {'x': 0.0, 'y': 0.0, 'attributes': {}},
+            'wp2': {'x': 5.0, 'y': 0.0, 'attributes': {}},
+            'wp3': {'x': 5.0, 'y': 5.0, 'attributes': {}},
+            'charger_1': {'x': 5.0, 'y': 10.0, 'attributes': {}},
+        }
+        edges = {
+            'e0': {'start': 'wp1', 'end': 'wp2', 'attributes': {}},
+            'e1': {'start': 'wp2', 'end': 'wp1', 'attributes': {}},
+            'e2': {'start': 'wp2', 'end': 'wp3', 'attributes': {}},
+            'e3': {'start': 'wp3', 'end': 'wp2', 'attributes': {}},
+            'e4': {
+                'start': 'wp3', 'end': 'charger_1',
+                'attributes': {},
+            },
+            'e5': {
+                'start': 'charger_1', 'end': 'wp3',
+                'attributes': {},
+            },
+        }
+        graph = create_graph(nodes, edges)
+        robot = RobotAdapter(
+            name='AGV-001', api=mock_api, node=mock_node,
+            fleet_handle=MagicMock(),
+            nav_nodes=nodes, nav_edges=edges, nav_graph=graph,
+            recharge_soc=0.8,
+        )
+        robot.configuration = MagicMock()
+        mock_handle = MagicMock()
+        mock_handle.more.return_value.current_task_id \
+            .return_value = 'charge-task-001'
+        robot.update_handle = mock_handle
+        robot.position = [0.0, 0.0, 0.0]
+        return robot
+
+    def _complete_charging(self, adapter, mock_api):
+        """충전 navigate → pre-charger 도착 → startCharging FINISHED."""
+        dest = MagicMock()
+        dest.name = 'charger_1'
+        dest.final_name = 'charger_1'
+        dest.dock = 'charger_1'
+        dest.position = [5.0, 10.0, 0.0]
+        dest.map = 'map1'
+        execution = MagicMock()
+
+        adapter.navigate(dest, execution)
+        adapter.cancel_cmd_attempt()
+
+        # pre-charger 도착
+        state = MagicMock()
+        target = adapter._navigate_target_position
+        data = RobotUpdateData(
+            robot_name='AGV-001', map_name='map1',
+            position=[target[0], target[1], 0.0],
+            battery_soc=0.30,
+        )
+        adapter.update(state, data)
+
+        # startCharging FINISHED
+        mock_api.is_command_completed.return_value = True
+        adapter.update(state, data)
+
+        return execution
+
+    def test_decommission_on_charging_start(
+        self, charging_adapter, mock_api
+    ):
+        """Charging 완료 시 decommission 플래그가 설정된다."""
+        self._complete_charging(charging_adapter, mock_api)
+
+        assert charging_adapter._is_charging_decommissioned is True
+        assert charging_adapter._was_charging is True
+
+    def test_stays_decommissioned_while_soc_low(
+        self, charging_adapter, mock_api
+    ):
+        """SOC가 recharge_soc 미만이면 decommission이 유지된다."""
+        self._complete_charging(charging_adapter, mock_api)
+
+        # SOC 0.5 < recharge_soc 0.8 → decommission 유지
+        state = MagicMock()
+        data = RobotUpdateData(
+            robot_name='AGV-001', map_name='map1',
+            position=[5.0, 5.0, 0.0],
+            battery_soc=0.5,
+        )
+        mock_api.is_command_completed.return_value = False
+        charging_adapter.update(state, data)
+
+        assert charging_adapter._is_charging_decommissioned is True
+
+        more_handle = (
+            charging_adapter.update_handle.more.return_value
+        )
+        more_handle.set_commission.assert_called()
+        commission = more_handle.commission.return_value
+        assert commission.accept_dispatched_tasks is False
+        assert commission.accept_direct_tasks is False
+        assert commission.perform_idle_behavior is False
+
+    def test_recommission_when_soc_reaches_threshold(
+        self, charging_adapter, mock_api
+    ):
+        """SOC가 정확히 recharge_soc에 도달하면 recommission된다."""
+        self._complete_charging(charging_adapter, mock_api)
+
+        state = MagicMock()
+        data = RobotUpdateData(
+            robot_name='AGV-001', map_name='map1',
+            position=[5.0, 5.0, 0.0],
+            battery_soc=0.8,  # == recharge_soc
+        )
+        mock_api.is_command_completed.return_value = False
+        charging_adapter.update(state, data)
+
+        assert charging_adapter._is_charging_decommissioned is False
+        assert charging_adapter._last_commission is None
+
+    def test_recommission_above_threshold(
+        self, charging_adapter, mock_api
+    ):
+        """SOC가 recharge_soc를 초과해도 recommission된다."""
+        self._complete_charging(charging_adapter, mock_api)
+
+        state = MagicMock()
+        data = RobotUpdateData(
+            robot_name='AGV-001', map_name='map1',
+            position=[5.0, 5.0, 0.0],
+            battery_soc=0.95,  # > recharge_soc
+        )
+        mock_api.is_command_completed.return_value = False
+        charging_adapter.update(state, data)
+
+        assert charging_adapter._is_charging_decommissioned is False
+        assert charging_adapter._last_commission is None
+
+    def test_stop_during_charging_clears_decommission(
+        self, charging_adapter, mock_api
+    ):
+        """충전 중 negotiation stop 시 decommission 해제."""
+        dest = MagicMock()
+        dest.name = 'charger_1'
+        dest.final_name = 'charger_1'
+        dest.dock = 'charger_1'
+        dest.position = [5.0, 10.0, 0.0]
+        dest.map = 'map1'
+        execution = MagicMock()
+
+        charging_adapter.navigate(dest, execution)
+        charging_adapter.cancel_cmd_attempt()
+
+        # pre-charger 도착 → _is_charging = True
+        state = MagicMock()
+        target = charging_adapter._navigate_target_position
+        data = RobotUpdateData(
+            robot_name='AGV-001', map_name='map1',
+            position=[target[0], target[1], 0.0],
+            battery_soc=0.30,
+        )
+        charging_adapter.update(state, data)
+        assert charging_adapter._is_charging is True
+
+        # negotiation stop
+        activity = MagicMock()
+        execution.identifier.is_same.return_value = True
+        charging_adapter.stop(activity)
+        charging_adapter.cancel_cmd_attempt()
+
+        assert charging_adapter._is_charging_decommissioned is False
+        assert charging_adapter._was_charging is True
+
+    def test_navigate_with_stop_charging_clears_flag(
+        self, charging_adapter, mock_api
+    ):
+        """Navigate에서 stopCharging 부착 시 decommission 해제."""
+        self._complete_charging(charging_adapter, mock_api)
+        assert charging_adapter._is_charging_decommissioned is True
+
+        # task 종료 → order reset
+        charging_adapter._reset_order_state()
+        assert charging_adapter._is_charging_decommissioned is True
+
+        # 새 navigate → stopCharging 부착
+        charging_adapter.position = [5.0, 5.0, 0.0]
+        mock_api.navigate.reset_mock()
+        mock_api.is_command_completed.return_value = False
+
+        dest2 = MagicMock()
+        dest2.name = 'wp2'
+        dest2.final_name = 'wp2'
+        dest2.dock = None
+        dest2.position = [5.0, 0.0, 0.0]
+        dest2.map = 'map1'
+        mock_handle = MagicMock()
+        mock_handle.more.return_value.current_task_id \
+            .return_value = 'new-task-001'
+        charging_adapter.update_handle = mock_handle
+
+        charging_adapter.navigate(dest2, MagicMock())
+        charging_adapter.cancel_cmd_attempt()
+
+        assert charging_adapter._is_charging_decommissioned is False
+        assert charging_adapter._was_charging is False
+
+    def test_no_decommission_when_not_charging(
+        self, charging_adapter, mock_api
+    ):
+        """충전이 아닌 일반 상태에서는 decommission이 적용 안 됨."""
+        state = MagicMock()
+        data = RobotUpdateData(
+            robot_name='AGV-001', map_name='map1',
+            position=[0.0, 0.0, 0.0],
+            battery_soc=0.3,
+        )
+        mock_api.get_commission_state.return_value = CommissionState(
+            True, True, True
+        )
+
+        charging_adapter.update(state, data)
+
+        assert charging_adapter._is_charging_decommissioned is False
+
+    def test_default_recharge_soc(
+        self, mock_api, mock_node,
+        sample_nav_nodes, sample_nav_edges,
+    ):
+        """기본 recharge_soc는 1.0이다."""
+        from vda5050_fleet_adapter.infra.nav_graph.graph_utils import (
+            create_graph,
+        )
+        graph = create_graph(sample_nav_nodes, sample_nav_edges)
+        robot = RobotAdapter(
+            name='AGV-001', api=mock_api, node=mock_node,
+            fleet_handle=MagicMock(),
+            nav_nodes=sample_nav_nodes,
+            nav_edges=sample_nav_edges,
+            nav_graph=graph,
+        )
+        assert robot.recharge_soc == 1.0
+
+    def test_decommission_persists_through_reset(
+        self, charging_adapter, mock_api
+    ):
+        """_is_charging_decommissioned은 _reset_order_state 이후 유지."""
+        self._complete_charging(charging_adapter, mock_api)
+        assert charging_adapter._is_charging_decommissioned is True
+
+        charging_adapter._reset_order_state()
+
+        assert charging_adapter._is_charging_decommissioned is True
