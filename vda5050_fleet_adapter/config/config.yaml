@@ -31,7 +31,7 @@ rmf_fleet:
     loop: True
     delivery: True
     clean: False
-  actions: ["teleop", "delivery_pickup", "delivery_dropoff"]
+  actions: ["teleop", "pick", "drop"]
   finishing_request: "park"
   robots:
     AGV_001:
@@ -43,7 +43,7 @@ rmf_fleet:
 
 # MQTT / VDA5050 CONFIG ========================================================
 fleet_manager:
-  ip: "127.0.0.1"
+  ip: "host.docker.internal"
   prefix: "uagv/v2/RobotCompany"   # MQTT topic prefix
   port: 1883
   user: ""

@@ -40,6 +40,7 @@ setup(
     entry_points={
         'console_scripts': [
             'fleet_adapter = vda5050_fleet_adapter.presentation.main:main',
+            'dispatch_delivery = vda5050_fleet_adapter.scripts.dispatch_delivery:main',
         ],
     },
 )
