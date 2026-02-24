@@ -292,11 +292,20 @@ class RobotAdapter:
         self._navigate_target_position = list(destination.position[:2])
         self._is_navigating = True
 
-        # dock 감지: 충전 태스크 여부 판단
+        # 충전 태스크 감지: dock 파라미터 또는 destination의
+        # nav_graph 속성 is_charger로 판단
         dock_name = getattr(destination, 'dock', None)
+        dest_name_raw = getattr(destination, 'name', '')
+        dest_node_attrs = self.nav_nodes.get(
+            dest_name_raw, {}
+        ).get('attributes', {})
+        dest_is_charger = dest_node_attrs.get('is_charger', False)
         if dock_name and isinstance(dock_name, str):
             self._is_charging_pending = True
             self._charging_station_name = dock_name
+        elif dest_is_charger and dest_name_raw:
+            self._is_charging_pending = True
+            self._charging_station_name = dest_name_raw
         else:
             self._is_charging_pending = False
             self._charging_station_name = None
