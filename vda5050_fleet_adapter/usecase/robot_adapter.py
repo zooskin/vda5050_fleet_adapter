@@ -53,6 +53,7 @@ class RobotAdapter:
         nav_edges: dict,
         nav_graph: Any,
         arrival_threshold: float = 0.5,
+        recharge_soc: float = 1.0,
     ) -> None:
         """Initialize."""
         self.name = name
@@ -63,6 +64,7 @@ class RobotAdapter:
         self.nav_edges = nav_edges
         self.nav_graph = nav_graph
         self.arrival_threshold = arrival_threshold
+        self.recharge_soc = recharge_soc
 
         self.execution: Any | None = None
         self.update_handle: Any | None = None
@@ -87,6 +89,11 @@ class RobotAdapter:
         # Negotiation 상태 관리
         self._is_paused_for_negotiation: bool = False
 
+        # 충전 상태 관리
+        self._is_charging_pending: bool = False
+        self._is_charging: bool = False
+        self._charging_station_name: str | None = None
+
         # 경로 캐시
         self._last_nodes: list[list] = []
         self._last_stitch_seq_id: int = 0  # 마지막 Base 노드의 sequenceId
@@ -110,7 +117,12 @@ class RobotAdapter:
 
         if self.execution is not None:
             completed = False
-            if self._is_navigating and self._navigate_target_position:
+            if self._is_charging:
+                # Phase 2: 충전 중 — SOC 모니터링
+                if data.battery_soc >= self.recharge_soc:
+                    self._send_stop_charging()
+                    completed = True
+            elif self._is_navigating and self._navigate_target_position:
                 dist = math.hypot(
                     data.position[0]
                     - self._navigate_target_position[0],
@@ -118,7 +130,20 @@ class RobotAdapter:
                     - self._navigate_target_position[1],
                 )
                 if dist <= self.arrival_threshold:
-                    completed = True
+                    if self._is_charging_pending:
+                        # Pre-charger 도착 → Phase 2 전환
+                        self._is_navigating = False
+                        self._is_charging_pending = False
+                        self._is_charging = True
+                        logger.info(
+                            'Pre-charger arrival for robot %s, '
+                            'transitioning to charging mode '
+                            '(station=%s)',
+                            self.name,
+                            self._charging_station_name,
+                        )
+                    else:
+                        completed = True
             else:
                 completed = self.api.is_command_completed(
                     self.name, self.cmd_id
@@ -127,8 +152,11 @@ class RobotAdapter:
                 self.execution.finished()
                 self.execution = None
                 self._is_navigating = False
+                self._is_charging = False
+                self._is_charging_pending = False
+                self._charging_station_name = None
                 self._navigate_target_position = None
-            else:
+            elif not self._is_charging:
                 activity_identifier = self.execution.identifier
 
         # Task 완료 감지: task_id가 변경되거나 비어있으면 order 리셋
@@ -213,10 +241,21 @@ class RobotAdapter:
         self.execution = execution
         self._navigate_target_position = list(destination.position[:2])
         self._is_navigating = True
+
+        # dock 감지: 충전 태스크 여부 판단
+        dock_name = getattr(destination, 'dock', None)
+        if dock_name and isinstance(dock_name, str):
+            self._is_charging_pending = True
+            self._charging_station_name = dock_name
+        else:
+            self._is_charging_pending = False
+            self._charging_station_name = None
+
         self.node.get_logger().info(
             f'[{self.name}] navigate callback called, '
             f'dest={destination.position}, map={destination.map}, '
-            f'name={getattr(destination, "name", "")}'
+            f'name={getattr(destination, "name", "")}, '
+            f'dock={dock_name}'
         )
 
         # Use destination.name for exact waypoint match (if available)
@@ -391,6 +430,27 @@ class RobotAdapter:
         else:
             base_end_index = len(path) - 1
 
+        # ── Charging: charger 노드 제거 + pre-charger에 도착 타겟 변경 ──
+        if self._is_charging_pending and len(path) >= 2:
+            path = path[:-1]
+            pre_charger = path[-1]
+            self._navigate_target_position = [
+                self.nav_nodes[pre_charger]['x'],
+                self.nav_nodes[pre_charger]['y'],
+            ]
+            # base_end_index 재계산 (charger 제거로 인한 인덱스 조정)
+            if goal_node in path:
+                base_end_index = path.index(goal_node)
+            else:
+                base_end_index = len(path) - 1
+            rmf_path_end = len(path) - 1
+            logger.info(
+                'Charging: removed charger node for robot %s, '
+                'pre_charger=%s, station=%s, path=%s',
+                self.name, pre_charger,
+                self._charging_station_name, path,
+            )
+
         logger.info(
             'Navigate [%s] 3-tier path: '
             'Horizon-RMF(tier1)=%s, Horizon-ext(tier2)=%s, '
@@ -417,6 +477,38 @@ class RobotAdapter:
             seq_start=seq_start,
             edges=self.nav_edges,
         )
+
+        # startCharging nodeAction 부착 (마지막 base 노드에)
+        if self._is_charging_pending and vda_nodes:
+            from vda5050_fleet_adapter.domain.entities.action import (
+                Action, ActionParameter,
+            )
+            from vda5050_fleet_adapter.domain.enums import BlockingType
+            charge_action = Action(
+                action_type='startCharging',
+                action_id=(
+                    f'startCharging_{self.cmd_id}'
+                    f'_{uuid.uuid4().hex[:8]}'
+                ),
+                blocking_type=BlockingType.HARD,
+                action_parameters=[
+                    ActionParameter(
+                        key='stationName',
+                        value=self._charging_station_name,
+                    ),
+                ],
+            )
+            last_base_idx = min(
+                base_end_index, len(vda_nodes) - 1,
+            )
+            vda_nodes[last_base_idx].actions.append(charge_action)
+            logger.info(
+                'Attached startCharging to node[%d] for robot %s '
+                '(station=%s, action_id=%s)',
+                last_base_idx, self.name,
+                self._charging_station_name,
+                charge_action.action_id,
+            )
 
         # 다음 order update를 위해 stitching sequenceId 저장
         # stitching node = 현재 Base의 마지막 노드
@@ -492,6 +584,12 @@ class RobotAdapter:
         """
         if self.execution is not None:
             if self.execution.identifier.is_same(activity):
+                # 충전 중이면 stopCharging 먼저 전송
+                if self._is_charging:
+                    self._send_stop_charging()
+                    self._is_charging = False
+                    self._is_charging_pending = False
+                    self._charging_station_name = None
                 self.execution = None
                 self._is_paused_for_negotiation = True
                 self.cancel_cmd_attempt()
@@ -722,6 +820,18 @@ class RobotAdapter:
             )
         return fallback
 
+    def _send_stop_charging(self) -> None:
+        """SOC 도달 시 stopCharging instantAction을 전송한다."""
+        self.cmd_id += 1
+        logger.info(
+            'Sending stopCharging for robot %s, cmd_id=%d',
+            self.name, self.cmd_id,
+        )
+        self.attempt_cmd_until_success(
+            cmd=self.api.start_activity,
+            args=(self.name, self.cmd_id, 'stopCharging', {}),
+        )
+
     def _reset_order_state(self) -> None:
         """Order 라이프사이클 상태를 초기화한다.
 
@@ -743,6 +853,9 @@ class RobotAdapter:
 
         self._navigate_target_position = None
         self._is_navigating = False
+        self._is_charging = False
+        self._is_charging_pending = False
+        self._charging_station_name = None
 
         old_task_id = self._current_task_id
         self._active_order_id = None

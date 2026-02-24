@@ -110,8 +110,8 @@ Action은 3가지 방식으로 AGV에 전달된다:
 
 | actionType | blockingType | 전달 방식 | 설명 | actionParameters | 구현 상태 |
 |------------|-------------|----------|------|-----------------|----------|
-| `startCharging` | HARD | nodeAction | 충전 시작 | - | [ ] |
-| `stopCharging` | HARD | nodeAction | 충전 중지 | - | [ ] |
+| `startCharging` | HARD | nodeAction | 충전 시작 (charger 앞 노드에 부착) | `stationName` | [x] |
+| `stopCharging` | HARD | instantAction | 충전 중지 (SOC 도달 시 자동 전송) | - | [x] |
 
 ### Cargo Handling
 
