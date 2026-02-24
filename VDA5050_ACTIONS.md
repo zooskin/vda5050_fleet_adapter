@@ -52,8 +52,48 @@ Action은 3가지 방식으로 AGV에 전달된다:
 | actionType | blockingType | 전달 방식 | 설명 | actionParameters |
 |------------|-------------|----------|------|-----------------|
 | `teleop` | HARD | instantAction | 원격 조종 | - |
-| `delivery_pickup` | HARD | nodeAction / instantAction | 화물 적재 | - |
-| `delivery_dropoff` | HARD | nodeAction / instantAction | 화물 하역 | - |
+| `pick` | HARD | nodeAction / instantAction | 화물 적재 | `loadType`, `loadID` |
+| `drop` | HARD | nodeAction / instantAction | 화물 하역 | `stationName` |
+
+#### `pick` Action 상세
+
+카트/화물 적재 action. RMF Task 생성 시 매개변수로 전달받는다.
+
+```json
+{
+  "actionType": "pick",
+  "actionId": "pick-patrol.dispatch-0",
+  "blockingType": "HARD",
+  "actionParameters": [
+    { "key": "loadType", "value": "Tool" },
+    { "key": "loadID", "value": "SP4ECTR002" }
+  ]
+}
+```
+
+| Parameter | Type | 설명 | 예시 | 소스 |
+|-----------|------|------|------|------|
+| `loadType` | string | 적재물 타입 종류 | `"Tool"`, `"Pallet"`, `"Box"` | Task 매개변수 |
+| `loadID` | string | 카트(적재물) 고유 ID | `"SP4ECTR002"` | Task 매개변수 |
+
+#### `drop` Action 상세
+
+카트/화물 하역 action. RMF Task 생성 시 매개변수로 전달받는다.
+
+```json
+{
+  "actionType": "drop",
+  "actionId": "drop-patrol.dispatch-0",
+  "blockingType": "HARD",
+  "actionParameters": [
+    { "key": "stationName", "value": "1004" }
+  ]
+}
+```
+
+| Parameter | Type | 설명 | 예시 | 소스 |
+|-----------|------|------|------|------|
+| `stationName` | string | 하역할 스테이션 이름 | `"1004"` | Task 매개변수 |
 
 ---
 
@@ -75,10 +115,7 @@ Action은 3가지 방식으로 AGV에 전달된다:
 
 ### Cargo Handling
 
-| actionType | blockingType | 전달 방식 | 설명 | actionParameters | 구현 상태 |
-|------------|-------------|----------|------|-----------------|----------|
-| `pick` | HARD | nodeAction | 화물 픽업 | `stationType`, `stationName`, `loadType` | [ ] |
-| `drop` | HARD | nodeAction | 화물 드롭 | `stationType`, `stationName`, `loadType` | [ ] |
+> `pick`/`drop`은 RMF Task Actions로 이동됨 (위 섹션 참조)
 
 ### Map Management
 
@@ -128,7 +165,7 @@ Action은 3가지 방식으로 AGV에 전달된다:
 
 ```yaml
 rmf_fleet:
-  actions: ["teleop", "delivery_pickup", "delivery_dropoff", "NEW_ACTION_TYPE"]
+  actions: ["teleop", "pick", "drop", "NEW_ACTION_TYPE"]
 ```
 
 ---
