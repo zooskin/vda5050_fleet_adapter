@@ -53,7 +53,6 @@ class RobotAdapter:
         nav_edges: dict,
         nav_graph: Any,
         arrival_threshold: float = 0.5,
-        recharge_soc: float = 1.0,
     ) -> None:
         """Initialize."""
         self.name = name
@@ -64,7 +63,6 @@ class RobotAdapter:
         self.nav_edges = nav_edges
         self.nav_graph = nav_graph
         self.arrival_threshold = arrival_threshold
-        self.recharge_soc = recharge_soc
 
         self.execution: Any | None = None
         self.update_handle: Any | None = None
@@ -90,9 +88,11 @@ class RobotAdapter:
         self._is_paused_for_negotiation: bool = False
 
         # 충전 상태 관리
-        self._is_charging_pending: bool = False
-        self._is_charging: bool = False
+        self._is_charging_pending: bool = False   # charger로 이동 중
+        self._is_charging: bool = False           # startCharging 완료 대기
         self._charging_station_name: str | None = None
+        self._charging_action_id: str | None = None
+        self._was_charging: bool = False          # 다음 order에 stopCharging 필요
 
         # 경로 캐시
         self._last_nodes: list[list] = []
@@ -118,10 +118,13 @@ class RobotAdapter:
         if self.execution is not None:
             completed = False
             if self._is_charging:
-                # Phase 2: 충전 중 — SOC 모니터링
-                if data.battery_soc >= self.recharge_soc:
-                    self._send_stop_charging()
-                    completed = True
+                # startCharging action 완료 대기
+                # (AGV 도킹+충전 시작 완료 시 FINISHED)
+                completed = self.api.is_command_completed(
+                    self.name, self.cmd_id
+                )
+                if completed:
+                    self._was_charging = True
             elif self._is_navigating and self._navigate_target_position:
                 dist = math.hypot(
                     data.position[0]
@@ -155,6 +158,7 @@ class RobotAdapter:
                 self._is_charging = False
                 self._is_charging_pending = False
                 self._charging_station_name = None
+                self._charging_action_id = None
                 self._navigate_target_position = None
             elif not self._is_charging:
                 activity_identifier = self.execution.identifier
@@ -478,37 +482,66 @@ class RobotAdapter:
             edges=self.nav_edges,
         )
 
-        # startCharging nodeAction 부착 (마지막 base 노드에)
-        if self._is_charging_pending and vda_nodes:
+        # ── Charging nodeAction 부착 ──
+        if vda_nodes and (
+            self._is_charging_pending or self._was_charging
+        ):
             from vda5050_fleet_adapter.domain.entities.action import (
                 Action, ActionParameter,
             )
             from vda5050_fleet_adapter.domain.enums import BlockingType
-            charge_action = Action(
-                action_type='startCharging',
-                action_id=(
-                    f'startCharging_{self.cmd_id}'
-                    f'_{uuid.uuid4().hex[:8]}'
-                ),
-                blocking_type=BlockingType.HARD,
-                action_parameters=[
-                    ActionParameter(
-                        key='stationName',
-                        value=self._charging_station_name,
+
+            # stopCharging: 이전 충전 상태 → 첫 번째 노드에 부착
+            if self._was_charging:
+                stop_action = Action(
+                    action_type='stopCharging',
+                    action_id=(
+                        f'stopCharging_{self.cmd_id}'
+                        f'_{uuid.uuid4().hex[:8]}'
                     ),
-                ],
-            )
-            last_base_idx = min(
-                base_end_index, len(vda_nodes) - 1,
-            )
-            vda_nodes[last_base_idx].actions.append(charge_action)
-            logger.info(
-                'Attached startCharging to node[%d] for robot %s '
-                '(station=%s, action_id=%s)',
-                last_base_idx, self.name,
-                self._charging_station_name,
-                charge_action.action_id,
-            )
+                    blocking_type=BlockingType.HARD,
+                    action_parameters=[],
+                )
+                vda_nodes[0].actions.append(stop_action)
+                logger.info(
+                    'Attached stopCharging to node[0] for '
+                    'robot %s (action_id=%s)',
+                    self.name, stop_action.action_id,
+                )
+                self._was_charging = False
+
+            # startCharging: 마지막 base 노드에 부착
+            if self._is_charging_pending:
+                charge_action = Action(
+                    action_type='startCharging',
+                    action_id=(
+                        f'startCharging_{self.cmd_id}'
+                        f'_{uuid.uuid4().hex[:8]}'
+                    ),
+                    blocking_type=BlockingType.HARD,
+                    action_parameters=[
+                        ActionParameter(
+                            key='stationName',
+                            value=self._charging_station_name,
+                        ),
+                    ],
+                )
+                last_base_idx = min(
+                    base_end_index, len(vda_nodes) - 1,
+                )
+                vda_nodes[last_base_idx].actions.append(
+                    charge_action
+                )
+                self._charging_action_id = (
+                    charge_action.action_id
+                )
+                logger.info(
+                    'Attached startCharging to node[%d] for '
+                    'robot %s (station=%s, action_id=%s)',
+                    last_base_idx, self.name,
+                    self._charging_station_name,
+                    charge_action.action_id,
+                )
 
         # 다음 order update를 위해 stitching sequenceId 저장
         # stitching node = 현재 Base의 마지막 노드
@@ -540,6 +573,13 @@ class RobotAdapter:
             self._order_update_id,
         )
 
+        # 충전 navigate: startCharging action 완료를 추적
+        track_id = (
+            self._charging_action_id
+            if self._is_charging_pending
+            else None
+        )
+
         if is_negotiation:
             # Negotiation: cancelOrder 전송 후 AGV가 처리할 시간을 주고
             # 새 order를 전송한다. attempt_cmd_until_success의 1초 대기를
@@ -556,17 +596,27 @@ class RobotAdapter:
                         self.name, cancel_cmd_id,
                     )
                     return RobotAPIResult.RETRY
-                return self.api.navigate(*args)
+                return self.api.navigate(
+                    *args, track_action_id=track_id
+                )
 
             self.attempt_cmd_until_success(
                 cmd=cancel_then_navigate,
                 args=nav_args,
             )
         else:
-            self.attempt_cmd_until_success(
-                cmd=self.api.navigate,
-                args=nav_args,
-            )
+            if track_id:
+                self.attempt_cmd_until_success(
+                    cmd=lambda *a: self.api.navigate(
+                        *a, track_action_id=track_id
+                    ),
+                    args=nav_args,
+                )
+            else:
+                self.attempt_cmd_until_success(
+                    cmd=self.api.navigate,
+                    args=nav_args,
+                )
 
     def stop(self, activity: Any) -> None:
         """RMF 정지 콜백.
@@ -584,12 +634,13 @@ class RobotAdapter:
         """
         if self.execution is not None:
             if self.execution.identifier.is_same(activity):
-                # 충전 중이면 stopCharging 먼저 전송
+                # 충전 중이면 다음 order에 stopCharging 부착 예약
                 if self._is_charging:
-                    self._send_stop_charging()
+                    self._was_charging = True
                     self._is_charging = False
                     self._is_charging_pending = False
                     self._charging_station_name = None
+                    self._charging_action_id = None
                 self.execution = None
                 self._is_paused_for_negotiation = True
                 self.cancel_cmd_attempt()
@@ -820,18 +871,6 @@ class RobotAdapter:
             )
         return fallback
 
-    def _send_stop_charging(self) -> None:
-        """SOC 도달 시 stopCharging instantAction을 전송한다."""
-        self.cmd_id += 1
-        logger.info(
-            'Sending stopCharging for robot %s, cmd_id=%d',
-            self.name, self.cmd_id,
-        )
-        self.attempt_cmd_until_success(
-            cmd=self.api.start_activity,
-            args=(self.name, self.cmd_id, 'stopCharging', {}),
-        )
-
     def _reset_order_state(self) -> None:
         """Order 라이프사이클 상태를 초기화한다.
 
@@ -856,6 +895,8 @@ class RobotAdapter:
         self._is_charging = False
         self._is_charging_pending = False
         self._charging_station_name = None
+        self._charging_action_id = None
+        # _was_charging은 보존: 다음 order에서 stopCharging 전송 필요
 
         old_task_id = self._current_task_id
         self._active_order_id = None
