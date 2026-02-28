@@ -6,6 +6,7 @@ VDA5050 Node/Edge 생성 기능을 제공한다.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import math
 from typing import Any
@@ -275,6 +276,33 @@ def find_edge_name(
     return None
 
 
+def _normalize_angle(angle: float) -> float:
+    """각도를 -π ~ π 범위로 정규화한다.
+
+    Args:
+        angle: 정규화할 각도 (rad).
+
+    Returns:
+        -π ~ π 범위의 각도.
+    """
+    return math.atan2(math.sin(angle), math.cos(angle))
+
+
+def _compute_heading(x1: float, y1: float, x2: float, y2: float) -> float:
+    """두 좌표 간 heading을 계산한다.
+
+    Args:
+        x1: 시작점 x.
+        y1: 시작점 y.
+        x2: 끝점 x.
+        y2: 끝점 y.
+
+    Returns:
+        heading (rad), atan2(dy, dx).
+    """
+    return math.atan2(y2 - y1, x2 - x1)
+
+
 def build_vda5050_nodes_edges(
     path: list[str],
     nodes: dict[str, dict[str, Any]],
@@ -282,6 +310,8 @@ def build_vda5050_nodes_edges(
     seq_start: int = 0,
     base_end_index: int | None = None,
     edges: dict[str, dict[str, Any]] | None = None,
+    turn_angle_threshold: float = 0.2618,
+    allowed_deviation_theta: float = 0.2618,
 ) -> tuple[list[Node], list[Edge]]:
     """경로에서 VDA5050 Node/Edge 목록을 생성한다.
 
@@ -297,6 +327,10 @@ def build_vda5050_nodes_edges(
         base_end_index: 마지막 Base 노드의 path 인덱스.
             None이면 모든 노드를 Base로 설정 (기존 동작).
         edges: nav graph 엣지 dict (속성 포함). None이면 속성 미적용.
+        turn_angle_threshold: Base 도착 노드에 theta를 설정하는
+            최소 회전각 (rad). 기본 0.2618 (15°).
+        allowed_deviation_theta: theta 설정 시 허용 오차 (rad).
+            기본 0.2618 (15°).
 
     Returns:
         (vda_nodes, vda_edges) 튜플.
@@ -336,6 +370,45 @@ def build_vda5050_nodes_edges(
                 ),
             )
         )
+
+    # Base 도착 노드에 theta 설정:
+    # base 이후 horizon이 있고 회전각이 threshold 이상이면
+    # 출발 heading을 theta로 설정하여 회전 완료 후 도착을 보고한다.
+    if (
+        base_end_index >= 1
+        and base_end_index < len(path) - 1
+    ):
+        prev_nd = nodes[path[base_end_index - 1]]
+        base_nd = nodes[path[base_end_index]]
+        next_nd = nodes[path[base_end_index + 1]]
+        heading_in = _compute_heading(
+            prev_nd['x'], prev_nd['y'], base_nd['x'], base_nd['y'],
+        )
+        heading_out = _compute_heading(
+            base_nd['x'], base_nd['y'], next_nd['x'], next_nd['y'],
+        )
+        turn_angle = abs(_normalize_angle(heading_out - heading_in))
+        if turn_angle >= turn_angle_threshold:
+            edge_orientation = edge_lookup.get(
+                (path[base_end_index], path[base_end_index + 1]),
+                {},
+            ).get('orientation', 0.0) or 0.0
+            theta = _normalize_angle(heading_out + edge_orientation)
+            old_pos = vda_nodes[base_end_index].node_position
+            new_pos = dataclasses.replace(
+                old_pos,
+                theta=theta,
+                allowed_deviation_theta=allowed_deviation_theta,
+            )
+            vda_nodes[base_end_index] = dataclasses.replace(
+                vda_nodes[base_end_index], node_position=new_pos,
+            )
+            logger.debug(
+                'Base node %s theta=%.3f (turn=%.1f°, threshold=%.1f°)',
+                path[base_end_index], theta,
+                math.degrees(turn_angle),
+                math.degrees(turn_angle_threshold),
+            )
 
     for i in range(len(path) - 1):
         seq = seq_start + i * 2 + 1

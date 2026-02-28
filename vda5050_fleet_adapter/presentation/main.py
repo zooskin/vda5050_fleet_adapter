@@ -66,6 +66,11 @@ def _update_robot(robot: RobotAdapter) -> None:
         )
         if not robot.api.is_robot_connected(robot.name):
             return
+        if not robot.api.is_download_map_ready(robot.name):
+            robot.node.get_logger().info(
+                f'[{robot.name}] waiting for downloadMap to complete...'
+            )
+            return
         robot.update_handle = robot.fleet_handle.add_robot(
             robot.name,
             state,
@@ -182,7 +187,11 @@ def main(argv: list[str] | None = None) -> None:
     prefix = fleet_mgr.get('prefix', 'uagv/v2/manufacturer')
     manufacturer = prefix.split('/')[-1] if '/' in prefix else ''
 
-    api = Vda5050RobotAPI(mqtt_client, prefix, manufacturer)
+    download_map_config = config_yaml.get('download_map')
+    api = Vda5050RobotAPI(
+        mqtt_client, prefix, manufacturer,
+        download_map_config=download_map_config,
+    )
     api.connect()
     time.sleep(0.5)  # MQTT 연결 대기
     node.get_logger().info(
@@ -191,8 +200,22 @@ def main(argv: list[str] | None = None) -> None:
     )
 
     # 8. 로봇별 RobotAdapter 생성
+    import math as _math
     arrival_threshold = config_yaml.get('rmf_fleet', {}).get(
         'arrival_threshold', 0.5
+    )
+    recharge_soc = config_yaml.get('rmf_fleet', {}).get(
+        'recharge_soc', 1.0
+    )
+    turn_angle_threshold = _math.radians(
+        config_yaml.get('rmf_fleet', {}).get(
+            'turn_angle_threshold', 15.0
+        )
+    )
+    allowed_deviation_theta = _math.radians(
+        config_yaml.get('rmf_fleet', {}).get(
+            'allowed_deviation_theta', 15.0
+        )
     )
     node.get_logger().info(f'known_robots: {fleet_config.known_robots}')
     robots: dict[str, RobotAdapter] = {}
@@ -215,6 +238,9 @@ def main(argv: list[str] | None = None) -> None:
             nav_edges=nav_edges,
             nav_graph=nav_graph,
             arrival_threshold=arrival_threshold,
+            recharge_soc=recharge_soc,
+            turn_angle_threshold=turn_angle_threshold,
+            allowed_deviation_theta=allowed_deviation_theta,
         )
         robot.configuration = robot_config
         robots[robot_name] = robot

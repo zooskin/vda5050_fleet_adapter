@@ -23,15 +23,15 @@ rmf_fleet:
     power: 20.0                # watts
   tool_system:
     power: 0.0                 # watts
-  recharge_threshold: 0.10
-  recharge_soc: 1.0
+  recharge_threshold: 0.40     # 40% 이하 시 자동 충전 task 발생
+  recharge_soc: 0.8
   publish_fleet_state: 10.0
   account_for_battery_drain: True
   task_capabilities:
     loop: True
     delivery: True
     clean: False
-  actions: ["teleop", "delivery_pickup", "delivery_dropoff"]
+  actions: ["teleop", "pick", "drop"]
   finishing_request: "park"
   robots:
     AGV_001:
@@ -40,14 +40,22 @@ rmf_fleet:
       charger: "tinyRobot2_charger"
   robot_state_update_frequency: 10.0
   arrival_threshold: 0.5            # meters, distance-based arrival detection
+  turn_angle_threshold: 15.0       # degrees, min turn angle to require theta check
+  allowed_deviation_theta: 15.0    # degrees, theta tolerance for arrival
 
 # MQTT / VDA5050 CONFIG ========================================================
 fleet_manager:
-  ip: "127.0.0.1"
+  ip: "localhost"
   prefix: "uagv/v2/RobotCompany"   # MQTT topic prefix
   port: 1883
   user: ""
   password: ""
+
+# DOWNLOAD MAP (optional) =====================================================
+download_map:
+  map_id: "L1"
+  map_download_url: "http://example.com/map.tar.gz"
+  map_version: "2.4.1"
 
 # COORDINATE TRANSFORM =========================================================
 # reference_coordinates:

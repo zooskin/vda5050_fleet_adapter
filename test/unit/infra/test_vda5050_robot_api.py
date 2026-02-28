@@ -679,3 +679,236 @@ class TestGetCommissionState:
         result = api.get_commission_state('AGV-001')
 
         assert result == CommissionState(False, False, False)
+
+
+@pytest.fixture
+def api_with_download_map(mock_mqtt):
+    """Vda5050RobotAPI with downloadMap config."""
+    return Vda5050RobotAPI(
+        mqtt_client=mock_mqtt,
+        prefix='uagv/v2/TestCo',
+        manufacturer='TestCo',
+        download_map_config={
+            'map_id': 'L1',
+            'map_download_url': 'http://example.com/map.tar.gz',
+            'map_version': '2.4.1',
+        },
+    )
+
+
+class TestDownloadMap:
+    """DownloadMap 기능 테스트."""
+
+    def test_no_config_means_always_ready(self, api):
+        """download_map config가 없으면 항상 ready."""
+        assert api.is_download_map_ready('AGV-001') is True
+
+    def test_not_ready_before_send(self, api_with_download_map):
+        """Before sending downloadMap, ready is False."""
+        assert (
+            api_with_download_map.is_download_map_ready('AGV-001')
+            is False
+        )
+
+    def test_send_on_online_transition(
+        self, api_with_download_map, mock_mqtt
+    ):
+        """ONLINE 전환 시 downloadMap instantAction을 전송한다."""
+        conn_json = json.dumps({
+            'headerId': 1,
+            'timestamp': '2026-01-01T00:00:00.000Z',
+            'version': '2.0.0',
+            'manufacturer': 'TestCo',
+            'serialNumber': 'AGV-001',
+            'connectionState': 'ONLINE',
+        })
+        api_with_download_map._on_connection_message(
+            'AGV-001', conn_json.encode('utf-8')
+        )
+
+        mock_mqtt.publish.assert_called_once()
+        topic = mock_mqtt.publish.call_args[0][0]
+        assert topic == 'uagv/v2/TestCo/AGV-001/instantActions'
+        payload = mock_mqtt.publish.call_args[0][1]
+        data = json.loads(payload)
+        assert data['actions'][0]['actionType'] == 'downloadMap'
+        params = data['actions'][0]['actionParameters']
+        param_keys = {p['key']: p['value'] for p in params}
+        assert param_keys['mapId'] == 'L1'
+        assert param_keys['mapDownloadUrl'] == (
+            'http://example.com/map.tar.gz'
+        )
+        assert param_keys['mapVersion'] == '2.4.1'
+
+    def test_no_send_when_already_online(
+        self, api_with_download_map, mock_mqtt
+    ):
+        """이미 ONLINE 상태에서 ONLINE 수신 시 재전송하지 않는다."""
+        api_with_download_map._connection_cache['AGV-001'] = (
+            ConnectionState.ONLINE
+        )
+        conn_json = json.dumps({
+            'headerId': 2,
+            'timestamp': '2026-01-01T00:00:01.000Z',
+            'version': '2.0.0',
+            'manufacturer': 'TestCo',
+            'serialNumber': 'AGV-001',
+            'connectionState': 'ONLINE',
+        })
+        api_with_download_map._on_connection_message(
+            'AGV-001', conn_json.encode('utf-8')
+        )
+
+        mock_mqtt.publish.assert_not_called()
+
+    def test_resend_on_reconnection(
+        self, api_with_download_map, mock_mqtt
+    ):
+        """OFFLINE → ONLINE 재연결 시 downloadMap을 재전송한다."""
+        # 첫 번째 ONLINE 전환
+        conn_online = json.dumps({
+            'headerId': 1,
+            'timestamp': '2026-01-01T00:00:00.000Z',
+            'version': '2.0.0',
+            'manufacturer': 'TestCo',
+            'serialNumber': 'AGV-001',
+            'connectionState': 'ONLINE',
+        })
+        api_with_download_map._on_connection_message(
+            'AGV-001', conn_online.encode('utf-8')
+        )
+        first_action_id = (
+            api_with_download_map._download_map_pending['AGV-001']
+        )
+
+        # OFFLINE 전환
+        conn_offline = json.dumps({
+            'headerId': 2,
+            'timestamp': '2026-01-01T00:00:01.000Z',
+            'version': '2.0.0',
+            'manufacturer': 'TestCo',
+            'serialNumber': 'AGV-001',
+            'connectionState': 'OFFLINE',
+        })
+        api_with_download_map._on_connection_message(
+            'AGV-001', conn_offline.encode('utf-8')
+        )
+
+        # 재연결 ONLINE
+        conn_online2 = json.dumps({
+            'headerId': 3,
+            'timestamp': '2026-01-01T00:00:02.000Z',
+            'version': '2.0.0',
+            'manufacturer': 'TestCo',
+            'serialNumber': 'AGV-001',
+            'connectionState': 'ONLINE',
+        })
+        api_with_download_map._on_connection_message(
+            'AGV-001', conn_online2.encode('utf-8')
+        )
+
+        assert mock_mqtt.publish.call_count == 2
+        second_action_id = (
+            api_with_download_map._download_map_pending['AGV-001']
+        )
+        assert first_action_id != second_action_id
+
+    def test_ready_when_action_finished(self, api_with_download_map):
+        """action_status가 FINISHED이면 ready."""
+        api_with_download_map._download_map_pending['AGV-001'] = (
+            'downloadMap_abc'
+        )
+
+        action_state = MagicMock()
+        action_state.action_id = 'downloadMap_abc'
+        action_state.action_status = ActionStatus.FINISHED
+
+        state = MagicMock()
+        state.action_states = [action_state]
+        api_with_download_map._state_cache['AGV-001'] = state
+
+        assert (
+            api_with_download_map.is_download_map_ready('AGV-001')
+            is True
+        )
+
+    def test_ready_when_action_failed(self, api_with_download_map):
+        """action_status가 FAILED이면 ready (실패해도 진행)."""
+        api_with_download_map._download_map_pending['AGV-001'] = (
+            'downloadMap_abc'
+        )
+
+        action_state = MagicMock()
+        action_state.action_id = 'downloadMap_abc'
+        action_state.action_status = ActionStatus.FAILED
+
+        state = MagicMock()
+        state.action_states = [action_state]
+        api_with_download_map._state_cache['AGV-001'] = state
+
+        assert (
+            api_with_download_map.is_download_map_ready('AGV-001')
+            is True
+        )
+
+    def test_not_ready_when_action_running(self, api_with_download_map):
+        """action_status가 RUNNING이면 아직 ready가 아니다."""
+        api_with_download_map._download_map_pending['AGV-001'] = (
+            'downloadMap_abc'
+        )
+
+        action_state = MagicMock()
+        action_state.action_id = 'downloadMap_abc'
+        action_state.action_status = ActionStatus.RUNNING
+
+        state = MagicMock()
+        state.action_states = [action_state]
+        api_with_download_map._state_cache['AGV-001'] = state
+
+        assert (
+            api_with_download_map.is_download_map_ready('AGV-001')
+            is False
+        )
+
+    def test_navigate_retries_when_map_not_ready(
+        self, api_with_download_map, mock_mqtt
+    ):
+        """Navigate returns RETRY when downloadMap not ready."""
+        api_with_download_map._download_map_pending['AGV-001'] = (
+            'downloadMap_abc'
+        )
+
+        action_state = MagicMock()
+        action_state.action_id = 'downloadMap_abc'
+        action_state.action_status = ActionStatus.RUNNING
+
+        state = MagicMock()
+        state.action_states = [action_state]
+        api_with_download_map._state_cache['AGV-001'] = state
+
+        nodes = [
+            Node(
+                node_id='wp1', sequence_id=0, released=True,
+                node_position=NodePosition(x=0.0, y=0.0, map_id='map1'),
+            ),
+        ]
+        result = api_with_download_map.navigate(
+            'AGV-001', 1, nodes, [], 'map1'
+        )
+        assert result == RobotAPIResult.RETRY
+
+    def test_no_config_no_send(self, api, mock_mqtt):
+        """Config 없으면 ONLINE 전환해도 downloadMap을 전송하지 않는다."""
+        conn_json = json.dumps({
+            'headerId': 1,
+            'timestamp': '2026-01-01T00:00:00.000Z',
+            'version': '2.0.0',
+            'manufacturer': 'TestCo',
+            'serialNumber': 'AGV-001',
+            'connectionState': 'ONLINE',
+        })
+        api._on_connection_message(
+            'AGV-001', conn_json.encode('utf-8')
+        )
+
+        mock_mqtt.publish.assert_not_called()
