@@ -57,6 +57,7 @@ class Vda5050RobotAPI(RobotAPI):
         mqtt_client: MqttClient,
         prefix: str,
         manufacturer: str = '',
+        download_map_config: dict | None = None,
     ) -> None:
         """Initialize."""
         self._mqtt = mqtt_client
@@ -74,6 +75,9 @@ class Vda5050RobotAPI(RobotAPI):
         self._header_ids: dict[str, int] = {}
         # 로봇별 연결 상태 캐시: {robot_name: ConnectionState}
         self._connection_cache: dict[str, ConnectionState] = {}
+        # downloadMap 설정 및 pending 상태
+        self._download_map_config = download_map_config
+        self._download_map_pending: dict[str, str | None] = {}
 
     def subscribe_robot(self, robot_name: str) -> None:
         """로봇의 MQTT 토픽을 구독한다.
@@ -111,6 +115,86 @@ class Vda5050RobotAPI(RobotAPI):
         with self._lock:
             state = self._connection_cache.get(robot_name)
         return state is None or state == ConnectionState.ONLINE
+
+    def is_download_map_ready(self, robot_name: str) -> bool:
+        """Check downloadMap action 완료 여부를 확인한다.
+
+        config가 없으면 항상 True. pending action_id가 없으면(미전송) False.
+        cached state의 action_states에서 FINISHED/FAILED이면 True.
+
+        Args:
+            robot_name: 로봇 이름.
+
+        Returns:
+            맵 다운로드 준비 완료 여부.
+        """
+        if self._download_map_config is None:
+            return True
+
+        with self._lock:
+            action_id = self._download_map_pending.get(robot_name)
+            state = self._state_cache.get(robot_name)
+
+        if action_id is None:
+            return False
+
+        if state is None:
+            return False
+
+        for action_state in state.action_states:
+            if action_state.action_id == action_id:
+                if action_state.action_status in (
+                    ActionStatus.FINISHED, ActionStatus.FAILED
+                ):
+                    return True
+
+        return False
+
+    def _send_download_map(self, robot_name: str) -> None:
+        """Send downloadMap instantAction을 전송한다.
+
+        Args:
+            robot_name: 로봇 이름.
+        """
+        if self._download_map_config is None:
+            return
+
+        from vda5050_fleet_adapter.domain.entities.action import (
+            ActionParameter,
+        )
+
+        action_id = f'downloadMap_{uuid.uuid4().hex[:8]}'
+        params = [
+            ActionParameter(
+                key='mapId',
+                value=self._download_map_config.get('map_id', ''),
+            ),
+            ActionParameter(
+                key='mapDownloadUrl',
+                value=self._download_map_config.get(
+                    'map_download_url', ''
+                ),
+            ),
+        ]
+        action = Action(
+            action_type='downloadMap',
+            action_id=action_id,
+            blocking_type=BlockingType.NONE,
+            action_parameters=params,
+        )
+
+        header = self._make_header(robot_name, 'instantActions')
+        payload = serialize_instant_actions(header, [action])
+        topic = self._build_topic(robot_name, 'instantActions')
+        self._mqtt.publish(topic, payload, qos=0)
+
+        with self._lock:
+            self._download_map_pending[robot_name] = action_id
+
+        logger.info(
+            'downloadMap sent: robot=%s, action_id=%s',
+            robot_name, action_id,
+        )
 
     def connect(self) -> None:
         """MQTT 브로커에 연결한다."""
@@ -155,6 +239,13 @@ class Vda5050RobotAPI(RobotAPI):
         if not self.is_robot_connected(robot_name):
             logger.warning(
                 'Robot %s not connected, will retry navigate', robot_name
+            )
+            return RobotAPIResult.RETRY
+
+        if not self.is_download_map_ready(robot_name):
+            logger.warning(
+                'Robot %s downloadMap not ready, will retry navigate',
+                robot_name,
             )
             return RobotAPIResult.RETRY
 
@@ -488,14 +579,21 @@ class Vda5050RobotAPI(RobotAPI):
                 deserialize_connection,
             )
             connection = deserialize_connection(payload.decode('utf-8'))
+            new_state = connection.connection_state
             with self._lock:
-                self._connection_cache[robot_name] = (
-                    connection.connection_state
-                )
+                prev_state = self._connection_cache.get(robot_name)
+                self._connection_cache[robot_name] = new_state
             logger.info(
                 'Connection update: robot=%s, state=%s',
-                robot_name, connection.connection_state,
+                robot_name, new_state,
             )
+
+            # ONLINE 전환 감지 시 downloadMap 전송
+            if (
+                new_state == ConnectionState.ONLINE
+                and prev_state != ConnectionState.ONLINE
+            ):
+                self._send_download_map(robot_name)
         except Exception:
             logger.exception(
                 'Failed to deserialize connection: robot=%s', robot_name

@@ -279,6 +279,67 @@ Task 완료 → _reset_order_state()
 - 충전 중 negotiation (`stop()`) → `_was_charging = True`, `_is_charging_decommissioned = False` → `startPause` → `cancelOrder` → 새 order에 `stopCharging` 부착
 - `_reset_order_state()` 호출 시 `_was_charging`, `_is_charging_decommissioned`을 제외한 모든 충전 상태 초기화
 
+### Map Management Actions
+
+| actionType | blockingType | 전달 방식 | 설명 | actionParameters |
+|------------|-------------|----------|------|-----------------|
+| `downloadMap` | NONE | instantAction | 로봇 ONLINE 전환 시 맵 다운로드 | `mapId`, `mapDownloadUrl` |
+
+#### `downloadMap` Action 상세
+
+로봇이 ONLINE으로 연결(또는 재연결)될 때 자동으로 `downloadMap` instantAction을 전송한다.
+Config(`download_map` 섹션)가 없으면 비활성화된다.
+
+```json
+{
+  "actionType": "downloadMap",
+  "actionId": "downloadMap_a1b2c3d4",
+  "blockingType": "NONE",
+  "actionParameters": [
+    { "key": "mapId", "value": "L1" },
+    { "key": "mapDownloadUrl", "value": "http://example.com/map.tar.gz" }
+  ]
+}
+```
+
+| Parameter | Type | 설명 | 예시 | 소스 |
+|-----------|------|------|------|------|
+| `mapId` | string | 다운로드할 맵 ID | `"L1"` | config.yaml `download_map.map_id` |
+| `mapDownloadUrl` | string | 맵 파일 다운로드 URL | `"http://example.com/map.tar.gz"` | config.yaml `download_map.map_download_url` |
+
+#### downloadMap 시퀀스
+
+```
+Phase 1: 로봇 연결 감지
+  → connection topic에서 ONLINE 수신
+  → 이전 상태가 ONLINE이 아닌 경우 (None, OFFLINE, CONNECTIONBROKEN)
+  → downloadMap instantAction 전송
+  → _download_map_pending[robot_name] = action_id 저장
+
+Phase 2: 맵 다운로드 완료 대기
+  → navigate() 호출 시 is_download_map_ready() pre-flight check
+  → _update_robot()에서 add_robot 전 is_download_map_ready() check
+  → AGV의 actionStates에서 해당 action_id가 FINISHED/FAILED 확인
+  → FINISHED/FAILED → is_download_map_ready() = True → 정상 동작 재개
+
+Phase 3: 재연결 시
+  → OFFLINE/CONNECTIONBROKEN → ONLINE 전환 감지
+  → 새로운 downloadMap action 전송 (기존 pending 덮어쓰기)
+  → 맵 다운로드 완료까지 order 전송 차단
+```
+
+#### Config 설정
+
+```yaml
+# config.yaml
+download_map:
+  map_id: "L1"
+  map_download_url: "http://example.com/map.tar.gz"
+```
+
+`download_map` 섹션이 없으면 downloadMap 기능이 비활성화되며,
+`is_download_map_ready()`는 항상 True를 반환한다.
+
 ---
 
 ## 추가 예정 Action
@@ -298,7 +359,7 @@ Task 완료 → _reset_order_state()
 
 | actionType | blockingType | 전달 방식 | 설명 | actionParameters | 구현 상태 |
 |------------|-------------|----------|------|-----------------|----------|
-| `downloadMap` | NONE | instantAction | 맵 다운로드 | `mapId`, `mapDownloadUrl` | [ ] |
+| `downloadMap` | NONE | instantAction | 맵 다운로드 | `mapId`, `mapDownloadUrl` | [x] |
 | `enableMap` | NONE | instantAction | 맵 활성화 | `mapId` | [ ] |
 | `deleteMap` | NONE | instantAction | 맵 삭제 | `mapId` | [ ] |
 

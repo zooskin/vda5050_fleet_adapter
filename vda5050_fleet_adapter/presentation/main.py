@@ -66,6 +66,11 @@ def _update_robot(robot: RobotAdapter) -> None:
         )
         if not robot.api.is_robot_connected(robot.name):
             return
+        if not robot.api.is_download_map_ready(robot.name):
+            robot.node.get_logger().info(
+                f'[{robot.name}] waiting for downloadMap to complete...'
+            )
+            return
         robot.update_handle = robot.fleet_handle.add_robot(
             robot.name,
             state,
@@ -182,7 +187,11 @@ def main(argv: list[str] | None = None) -> None:
     prefix = fleet_mgr.get('prefix', 'uagv/v2/manufacturer')
     manufacturer = prefix.split('/')[-1] if '/' in prefix else ''
 
-    api = Vda5050RobotAPI(mqtt_client, prefix, manufacturer)
+    download_map_config = config_yaml.get('download_map')
+    api = Vda5050RobotAPI(
+        mqtt_client, prefix, manufacturer,
+        download_map_config=download_map_config,
+    )
     api.connect()
     time.sleep(0.5)  # MQTT 연결 대기
     node.get_logger().info(
