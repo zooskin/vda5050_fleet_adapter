@@ -1,6 +1,10 @@
 """graph_utils 유닛 테스트."""
 
+import math
+
 from vda5050_fleet_adapter.infra.nav_graph.graph_utils import (
+    _compute_heading,
+    _normalize_angle,
     apply_transformations,
     build_vda5050_nodes_edges,
     compute_path,
@@ -478,3 +482,119 @@ class TestBuildVda5050NavGraphProperties:
         assert e.rotation_allowed is None
         assert e.corridor is None
         assert e.trajectory is None
+
+
+class TestNormalizeAngle:
+    """_normalize_angle() 테스트."""
+
+    def test_within_range(self):
+        """범위 내 각도는 그대로 반환."""
+        assert abs(_normalize_angle(1.0) - 1.0) < 1e-10
+
+    def test_over_pi(self):
+        """π 초과 각도를 정규화."""
+        result = _normalize_angle(math.pi + 0.5)
+        assert -math.pi <= result <= math.pi
+
+    def test_under_neg_pi(self):
+        """-π 미만 각도를 정규화."""
+        result = _normalize_angle(-math.pi - 0.5)
+        assert -math.pi <= result <= math.pi
+
+
+class TestComputeHeading:
+    """_compute_heading() 테스트."""
+
+    def test_east(self):
+        """동쪽 heading은 0."""
+        assert abs(_compute_heading(0, 0, 1, 0)) < 1e-10
+
+    def test_north(self):
+        """북쪽 heading은 π/2."""
+        assert abs(_compute_heading(0, 0, 0, 1) - math.pi / 2) < 1e-10
+
+
+class TestBuildVda5050ThetaOnBaseNode:
+    """build_vda5050_nodes_edges()의 Base 노드 theta 설정 테스트."""
+
+    def _make_l_shaped_nodes(self):
+        """L자 형태 노드: wp1→wp2 (동쪽), wp2→wp3 (북쪽), 90° 회전."""
+        return {
+            'wp1': {'x': 0.0, 'y': 0.0, 'attributes': {}},
+            'wp2': {'x': 5.0, 'y': 0.0, 'attributes': {}},
+            'wp3': {'x': 5.0, 'y': 5.0, 'attributes': {}},
+        }
+
+    def test_theta_set_when_turn_ge_threshold(self):
+        """회전각 >= 15°이면 Base 노드에 theta가 설정된다."""
+        nodes = self._make_l_shaped_nodes()
+        vda_nodes, _ = build_vda5050_nodes_edges(
+            ['wp1', 'wp2', 'wp3'], nodes, 'map1',
+            base_end_index=1,
+        )
+
+        base_pos = vda_nodes[1].node_position
+        assert base_pos.theta is not None
+        # wp2→wp3 heading = π/2 (북쪽), orientation=0
+        assert abs(base_pos.theta - math.pi / 2) < 1e-6
+        assert base_pos.allowed_deviation_theta is not None
+
+    def test_theta_not_set_when_turn_lt_threshold(self):
+        """회전각 < 15°이면 theta가 None이다."""
+        # 거의 직선인 3개 노드
+        nodes = {
+            'wp1': {'x': 0.0, 'y': 0.0, 'attributes': {}},
+            'wp2': {'x': 5.0, 'y': 0.0, 'attributes': {}},
+            'wp3': {'x': 10.0, 'y': 0.1, 'attributes': {}},
+        }
+        vda_nodes, _ = build_vda5050_nodes_edges(
+            ['wp1', 'wp2', 'wp3'], nodes, 'map1',
+            base_end_index=1,
+        )
+
+        assert vda_nodes[1].node_position.theta is None
+
+    def test_theta_not_set_when_base_is_first(self):
+        """base_end_index=0이면 theta 미설정 (이전 노드 없음)."""
+        nodes = self._make_l_shaped_nodes()
+        vda_nodes, _ = build_vda5050_nodes_edges(
+            ['wp1', 'wp2', 'wp3'], nodes, 'map1',
+            base_end_index=0,
+        )
+
+        assert vda_nodes[0].node_position.theta is None
+
+    def test_theta_not_set_when_base_is_last(self):
+        """base가 마지막 노드 (horizon 없음)이면 theta 미설정."""
+        nodes = self._make_l_shaped_nodes()
+        vda_nodes, _ = build_vda5050_nodes_edges(
+            ['wp1', 'wp2', 'wp3'], nodes, 'map1',
+            base_end_index=2,
+        )
+
+        assert vda_nodes[2].node_position.theta is None
+
+    def test_edge_orientation_affects_theta(self):
+        """Edge orientation 값이 theta에 반영된다."""
+        nodes = self._make_l_shaped_nodes()
+        nav_edges = {
+            'e0': {
+                'start': 'wp1', 'end': 'wp2', 'attributes': {},
+            },
+            'e1': {
+                'start': 'wp2', 'end': 'wp3',
+                'attributes': {'orientation': 0.5},
+            },
+        }
+        vda_nodes, _ = build_vda5050_nodes_edges(
+            ['wp1', 'wp2', 'wp3'], nodes, 'map1',
+            base_end_index=1,
+            edges=nav_edges,
+        )
+
+        base_pos = vda_nodes[1].node_position
+        assert base_pos.theta is not None
+        # heading_out = π/2, orientation = 0.5
+        # theta = normalize(π/2 + 0.5)
+        expected = _normalize_angle(math.pi / 2 + 0.5)
+        assert abs(base_pos.theta - expected) < 1e-6

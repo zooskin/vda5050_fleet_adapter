@@ -14,6 +14,7 @@ from typing import Any
 import uuid
 
 from vda5050_fleet_adapter.infra.nav_graph.graph_utils import (
+    _normalize_angle,
     build_vda5050_nodes_edges,
     compute_path,
     find_nearest_node,
@@ -55,6 +56,8 @@ class RobotAdapter:
         nav_graph: Any,
         arrival_threshold: float = 0.5,
         recharge_soc: float = 1.0,
+        turn_angle_threshold: float = 0.2618,
+        allowed_deviation_theta: float = 0.2618,
     ) -> None:
         """Initialize."""
         self.name = name
@@ -66,6 +69,8 @@ class RobotAdapter:
         self.nav_graph = nav_graph
         self.arrival_threshold = arrival_threshold
         self.recharge_soc = recharge_soc
+        self.turn_angle_threshold = turn_angle_threshold
+        self.allowed_deviation_theta = allowed_deviation_theta
 
         self.execution: Any | None = None
         self.update_handle: Any | None = None
@@ -75,6 +80,7 @@ class RobotAdapter:
 
         # Navigate 도착 판정 상태
         self._navigate_target_position: list[float] | None = None
+        self._navigate_target_theta: float | None = None
         self._is_navigating: bool = False
 
         # Order 라이프사이클 관리
@@ -138,7 +144,19 @@ class RobotAdapter:
                     - self._navigate_target_position[1],
                 )
                 if dist <= self.arrival_threshold:
-                    if self._is_charging_pending:
+                    theta_ok = True
+                    if self._navigate_target_theta is not None:
+                        angle_diff = abs(_normalize_angle(
+                            data.position[2]
+                            - self._navigate_target_theta
+                        ))
+                        theta_ok = (
+                            angle_diff
+                            <= self.allowed_deviation_theta
+                        )
+                    if not theta_ok:
+                        pass  # 회전 미완료, 도착 보류
+                    elif self._is_charging_pending:
                         # Pre-charger 도착 → Phase 2 전환
                         self._is_navigating = False
                         self._is_charging_pending = False
@@ -165,6 +183,7 @@ class RobotAdapter:
                 self._charging_station_name = None
                 self._charging_action_id = None
                 self._navigate_target_position = None
+                self._navigate_target_theta = None
             elif not self._is_charging:
                 activity_identifier = self.execution.identifier
 
@@ -535,6 +554,14 @@ class RobotAdapter:
             base_end_index=base_end_index,
             seq_start=seq_start,
             edges=self.nav_edges,
+            turn_angle_threshold=self.turn_angle_threshold,
+            allowed_deviation_theta=self.allowed_deviation_theta,
+        )
+
+        # Base 도착 노드의 theta를 도착 판정에 사용
+        base_node_pos = vda_nodes[base_end_index].node_position
+        self._navigate_target_theta = (
+            base_node_pos.theta if base_node_pos else None
         )
 
         # ── Charging nodeAction 부착 ──
@@ -699,6 +726,7 @@ class RobotAdapter:
                     self._charging_station_name = None
                     self._charging_action_id = None
                 self.execution = None
+                self._navigate_target_theta = None
                 self._is_paused_for_negotiation = True
                 self.cancel_cmd_attempt()
                 self.cmd_id += 1
@@ -948,6 +976,7 @@ class RobotAdapter:
             )
 
         self._navigate_target_position = None
+        self._navigate_target_theta = None
         self._is_navigating = False
         self._is_charging = False
         self._is_charging_pending = False
