@@ -283,7 +283,7 @@ Task 완료 → _reset_order_state()
 
 | actionType | blockingType | 전달 방식 | 설명 | actionParameters |
 |------------|-------------|----------|------|-----------------|
-| `downloadMap` | NONE | instantAction | 로봇 ONLINE 전환 시 맵 다운로드 | `mapId`, `mapDownloadUrl` |
+| `downloadMap` | NONE | instantAction | 로봇 ONLINE 전환 시 맵 다운로드 | `mapId`, `mapDownloadUrl`, `mapVersion` |
 
 #### `downloadMap` Action 상세
 
@@ -297,7 +297,8 @@ Config(`download_map` 섹션)가 없으면 비활성화된다.
   "blockingType": "NONE",
   "actionParameters": [
     { "key": "mapId", "value": "L1" },
-    { "key": "mapDownloadUrl", "value": "http://example.com/map.tar.gz" }
+    { "key": "mapDownloadUrl", "value": "http://example.com/map.tar.gz" },
+    { "key": "mapVersion", "value": "2.4.1" }
   ]
 }
 ```
@@ -306,6 +307,7 @@ Config(`download_map` 섹션)가 없으면 비활성화된다.
 |-----------|------|------|------|------|
 | `mapId` | string | 다운로드할 맵 ID | `"L1"` | config.yaml `download_map.map_id` |
 | `mapDownloadUrl` | string | 맵 파일 다운로드 URL | `"http://example.com/map.tar.gz"` | config.yaml `download_map.map_download_url` |
+| `mapVersion` | string | 맵 버전 | `"2.4.1"` | config.yaml `download_map.map_version` |
 
 #### downloadMap 시퀀스
 

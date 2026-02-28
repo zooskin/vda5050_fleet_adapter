@@ -701,6 +701,136 @@ class TestDistanceBasedArrival:
         assert adapter._navigate_target_position is None
 
 
+class TestThetaBasedArrival:
+    """Theta 기반 도착 판정 테스트."""
+
+    def test_theta_ok_completes(self, adapter, mock_api):
+        """거리 OK + theta OK → 도착 완료."""
+        import math
+        execution = MagicMock()
+        adapter.execution = execution
+        adapter.update_handle = MagicMock()
+        adapter._is_navigating = True
+        adapter._navigate_target_position = [5.0, 0.0]
+        adapter._navigate_target_theta = math.pi / 2
+        adapter.allowed_deviation_theta = math.radians(15)
+        adapter.arrival_threshold = 0.5
+
+        state = MagicMock()
+        data = RobotUpdateData(
+            robot_name='AGV-001', map_name='map1',
+            position=[5.0, 0.0, math.pi / 2],  # exact theta
+            battery_soc=0.85,
+        )
+
+        adapter.update(state, data)
+
+        execution.finished.assert_called_once()
+        assert adapter.execution is None
+
+    def test_theta_ng_not_completed(self, adapter, mock_api):
+        """거리 OK + theta NG → 미도착."""
+        import math
+        execution = MagicMock()
+        adapter.execution = execution
+        adapter.update_handle = MagicMock()
+        adapter._is_navigating = True
+        adapter._navigate_target_position = [5.0, 0.0]
+        adapter._navigate_target_theta = math.pi / 2
+        adapter.allowed_deviation_theta = math.radians(15)
+        adapter.arrival_threshold = 0.5
+
+        state = MagicMock()
+        data = RobotUpdateData(
+            robot_name='AGV-001', map_name='map1',
+            position=[5.0, 0.0, 0.0],  # theta off by π/2
+            battery_soc=0.85,
+        )
+
+        adapter.update(state, data)
+
+        execution.finished.assert_not_called()
+        assert adapter.execution is execution
+
+    def test_no_theta_distance_only(self, adapter, mock_api):
+        """Theta 미설정 시 거리 기반 도착 (기존 동작)."""
+        execution = MagicMock()
+        adapter.execution = execution
+        adapter.update_handle = MagicMock()
+        adapter._is_navigating = True
+        adapter._navigate_target_position = [5.0, 0.0]
+        adapter._navigate_target_theta = None
+        adapter.arrival_threshold = 0.5
+
+        state = MagicMock()
+        data = RobotUpdateData(
+            robot_name='AGV-001', map_name='map1',
+            position=[5.0, 0.0, 0.0],
+            battery_soc=0.85,
+        )
+
+        adapter.update(state, data)
+
+        execution.finished.assert_called_once()
+        assert adapter.execution is None
+
+    def test_theta_within_deviation_completes(self, adapter, mock_api):
+        """theta가 허용 오차 내이면 도착 완료."""
+        import math
+        execution = MagicMock()
+        adapter.execution = execution
+        adapter.update_handle = MagicMock()
+        adapter._is_navigating = True
+        adapter._navigate_target_position = [5.0, 0.0]
+        adapter._navigate_target_theta = math.pi / 2
+        adapter.allowed_deviation_theta = math.radians(15)
+        adapter.arrival_threshold = 0.5
+
+        state = MagicMock()
+        data = RobotUpdateData(
+            robot_name='AGV-001', map_name='map1',
+            # theta off by 10° (< 15° threshold)
+            position=[5.0, 0.0, math.pi / 2 + math.radians(10)],
+            battery_soc=0.85,
+        )
+
+        adapter.update(state, data)
+
+        execution.finished.assert_called_once()
+
+    def test_theta_reset_on_completion(self, adapter, mock_api):
+        """도착 완료 시 _navigate_target_theta가 None으로 리셋."""
+        import math
+        execution = MagicMock()
+        adapter.execution = execution
+        adapter.update_handle = MagicMock()
+        adapter._is_navigating = True
+        adapter._navigate_target_position = [5.0, 0.0]
+        adapter._navigate_target_theta = math.pi / 2
+        adapter.allowed_deviation_theta = math.radians(15)
+        adapter.arrival_threshold = 0.5
+
+        state = MagicMock()
+        data = RobotUpdateData(
+            robot_name='AGV-001', map_name='map1',
+            position=[5.0, 0.0, math.pi / 2],
+            battery_soc=0.85,
+        )
+
+        adapter.update(state, data)
+
+        assert adapter._navigate_target_theta is None
+
+    def test_theta_reset_on_order_reset(self, adapter):
+        """_reset_order_state가 _navigate_target_theta를 리셋."""
+        import math
+        adapter._navigate_target_theta = math.pi / 2
+
+        adapter._reset_order_state()
+
+        assert adapter._navigate_target_theta is None
+
+
 class TestRobotAdapterRetry:
     """attempt_cmd_until_success() 테스트."""
 

@@ -200,11 +200,22 @@ def main(argv: list[str] | None = None) -> None:
     )
 
     # 8. 로봇별 RobotAdapter 생성
+    import math as _math
     arrival_threshold = config_yaml.get('rmf_fleet', {}).get(
         'arrival_threshold', 0.5
     )
     recharge_soc = config_yaml.get('rmf_fleet', {}).get(
         'recharge_soc', 1.0
+    )
+    turn_angle_threshold = _math.radians(
+        config_yaml.get('rmf_fleet', {}).get(
+            'turn_angle_threshold', 15.0
+        )
+    )
+    allowed_deviation_theta = _math.radians(
+        config_yaml.get('rmf_fleet', {}).get(
+            'allowed_deviation_theta', 15.0
+        )
     )
     node.get_logger().info(f'known_robots: {fleet_config.known_robots}')
     robots: dict[str, RobotAdapter] = {}
@@ -228,6 +239,8 @@ def main(argv: list[str] | None = None) -> None:
             nav_graph=nav_graph,
             arrival_threshold=arrival_threshold,
             recharge_soc=recharge_soc,
+            turn_angle_threshold=turn_angle_threshold,
+            allowed_deviation_theta=allowed_deviation_theta,
         )
         robot.configuration = robot_config
         robots[robot_name] = robot

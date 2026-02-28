@@ -138,6 +138,13 @@ rmf에서 negotiation이 발생하면 아래 순서를 따른다:
 - **execute_action 명령**: VDA5050 state의 action_states에서 action_id의 상태가 FINISHED/FAILED인지 확인.
 - navigate 완료는 RMF의 책임이므로, VDA5050의 Base node 진행 상태가 아닌 거리 기반으로 빠르게 피드백.
 
+### Theta 기반 도착 판정 (구현 완료)
+- Base 도착 노드 이후에 Horizon이 있고, 진입/진출 heading 간 회전각이 `turn_angle_threshold`(기본 15°) 이상이면 theta 조건을 추가.
+- `build_vda5050_nodes_edges()`에서 Base 노드의 `NodePosition.theta`를 진출 heading + edge orientation으로 설정.
+- `update()`에서 거리 조건 통과 후 `_navigate_target_theta`가 설정되어 있으면 로봇의 현재 heading과 비교, `allowed_deviation_theta`(기본 15°) 이내여야 도착으로 판정.
+- theta 미설정(직진 구간, base가 첫/마지막 노드) 시 기존 거리 기반 도착 동작 유지.
+- 설정: `config.yaml`의 `rmf_fleet.turn_angle_threshold` (degree), `rmf_fleet.allowed_deviation_theta` (degree).
+
 ## Execute Action as NodeAction (구현 완료)
 - cart_delivery 등에서 execute_action(pickup/dropoff)이 호출될 때, 활성 order가 있으면 instantAction 대신 **order update의 nodeAction**으로 전송.
 - 현재 위치의 가장 가까운 노드에 `BlockingType.HARD` action을 붙여 order update로 전송.
@@ -148,6 +155,12 @@ rmf에서 negotiation이 발생하면 아래 순서를 따른다:
 - VDA5050 connection topic을 구독하여 로봇별 연결 상태(`ConnectionState`)를 캐싱.
 - `is_robot_connected()`: navigate 등 명령 전송 전 pre-flight check. 미연결 시 `RETRY` 반환.
 - Fleet adapter 시작 시 로봇이 연결되지 않은 상태면 RMF에 `add_robot`하지 않음.
+
+## downloadMap instantAction (구현 완료)
+- 로봇이 ONLINE으로 연결(또는 재연결)될 때 `downloadMap` instantAction을 자동 전송.
+- `config.yaml`의 `download_map` 섹션에서 설정. 섹션이 없으면 비활성화.
+- actionParameters: `mapId`, `mapDownloadUrl`, `mapVersion`.
+- `is_download_map_ready()`로 action 완료(FINISHED/FAILED)를 확인, 미완료 시 navigate가 RETRY.
 
 ## Commission 자동 업데이트 (구현 완료)
 - VDA5050 state 기반으로 RMF commission을 자동 갱신:
