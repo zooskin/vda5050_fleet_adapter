@@ -135,8 +135,13 @@ class Vda5050RobotAPI(RobotAPI):
             action_id = self._download_map_pending.get(robot_name)
             state = self._state_cache.get(robot_name)
 
+        # 미전송 상태
         if action_id is None:
             return False
+
+        # 이미 완료 확인됨
+        if action_id == '':
+            return True
 
         if state is None:
             return False
@@ -146,6 +151,14 @@ class Vda5050RobotAPI(RobotAPI):
                 if action_state.action_status in (
                     ActionStatus.FINISHED, ActionStatus.FAILED
                 ):
+                    with self._lock:
+                        self._download_map_pending[robot_name] = ''
+                    logger.info(
+                        'downloadMap completed: robot=%s, '
+                        'action_id=%s, status=%s',
+                        robot_name, action_id,
+                        action_state.action_status,
+                    )
                     return True
 
         return False
