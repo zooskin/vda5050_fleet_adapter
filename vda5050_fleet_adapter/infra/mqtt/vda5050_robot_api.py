@@ -175,6 +175,12 @@ class Vda5050RobotAPI(RobotAPI):
                     'map_download_url', ''
                 ),
             ),
+            ActionParameter(
+                key='mapVersion',
+                value=self._download_map_config.get(
+                    'map_version', ''
+                ),
+            ),
         ]
         action = Action(
             action_type='downloadMap',

@@ -691,6 +691,7 @@ def api_with_download_map(mock_mqtt):
         download_map_config={
             'map_id': 'L1',
             'map_download_url': 'http://example.com/map.tar.gz',
+            'map_version': '2.4.1',
         },
     )
 
@@ -737,6 +738,7 @@ class TestDownloadMap:
         assert param_keys['mapDownloadUrl'] == (
             'http://example.com/map.tar.gz'
         )
+        assert param_keys['mapVersion'] == '2.4.1'
 
     def test_no_send_when_already_online(
         self, api_with_download_map, mock_mqtt
