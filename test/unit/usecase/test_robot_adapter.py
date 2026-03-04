@@ -370,10 +370,13 @@ class TestRobotAdapterUpdate:
         )
 
         adapter.update(state, data)
+        adapter.cancel_cmd_attempt()
 
         assert adapter._order.active_order_id is None
         assert adapter._order.order_update_id == 0
         assert adapter._order.final_destination is None
+        # Task 종료 시 cancelOrder 전송
+        mock_api.stop.assert_called_once()
 
     def test_update_keeps_execution_if_not_completed(
         self, adapter, mock_api
@@ -1304,6 +1307,56 @@ class TestNegotiation:
         assert mock_api.stop.call_count == 1
         # 새 navigate 호출 확인 (총 2회: 첫 번째 + negotiation 후)
         assert mock_api.navigate.call_count == 2
+
+
+class TestTaskCancelSendsCancelOrder:
+    """Task cancel 시 cancelOrder 전송 테스트."""
+
+    def test_cancel_after_navigate_completes_sends_cancel_order(
+        self, adapter_with_handle, mock_api
+    ):
+        """Navigate 완료 후 task가 끝나면 cancelOrder를 전송한다."""
+        adapter = adapter_with_handle
+
+        # navigate 상태를 직접 설정 (thread 의존성 제거)
+        adapter.execution = MagicMock()
+        adapter._order.active_order_id = 'order-cancel-test'
+        adapter._order.current_task_id = 'compose.dispatch-001'
+        adapter._nav.is_navigating = True
+        adapter._nav.target_position = [5.0, 0.0]
+
+        mock_api.stop.assert_not_called()
+
+        # navigate 도착 → execution 완료
+        state = MagicMock()
+        data = RobotUpdateData(
+            robot_name='AGV-001', map_name='map1',
+            position=[5.0, 0.0, 0.0], battery_soc=0.85,
+        )
+        adapter.update(state, data)
+
+        # execution 완료, order는 아직 유지 (task 진행 중)
+        assert adapter.execution is None
+        assert adapter._order.active_order_id == 'order-cancel-test'
+
+        # task cancel: task_id가 빈 문자열로 변경
+        adapter.update_handle.more.return_value \
+            .current_task_id.return_value = ''
+        adapter.update(state, data)
+        adapter.cancel_cmd_attempt()
+
+        mock_api.stop.assert_called_once()
+        assert adapter._order.active_order_id is None
+
+    def test_no_cancel_order_when_no_active_order(
+        self, adapter_with_handle, mock_api
+    ):
+        """Active order가 없으면 cancelOrder를 전송하지 않는다."""
+        assert adapter_with_handle._order.active_order_id is None
+
+        adapter_with_handle._reset_order_state()
+
+        mock_api.stop.assert_not_called()
 
 
 class TestDetourPath:

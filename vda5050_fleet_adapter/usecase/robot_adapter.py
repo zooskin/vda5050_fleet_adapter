@@ -1294,30 +1294,21 @@ class RobotAdapter:
     def _reset_order_state(self) -> None:
         """Order 라이프사이클 상태를 초기화한다.
 
-        Pause 상태에서 navigate 없이 task가 종료된 경우
-        cancelOrder를 전송하여 로봇의 order를 정리한다.
+        활성 order가 있으면 cancelOrder를 전송하여 로봇의 order를
+        정리한다. Task 취소, negotiation pause 중 종료, pickDrop
+        pending 중 종료 등 모든 경우를 처리한다.
         """
-        if self._is_paused_for_negotiation:
-            self._is_paused_for_negotiation = False
-            self.cmd_id += 1
-            logger.info(
-                'Task ended while paused, sending cancelOrder '
-                'for robot %s, cmd_id=%d',
-                self.name, self.cmd_id,
-            )
-            self.attempt_cmd_until_success(
-                cmd=self.api.stop,
-                args=(self.name, self.cmd_id),
-            )
+        self._is_paused_for_negotiation = False
+        self._pick_drop.destination = None
+        self._pick_drop.station_node = None
 
-        if self._pick_drop.destination is not None:
-            self._pick_drop.destination = None
-            self._pick_drop.station_node = None
+        if self._order.active_order_id is not None:
             self.cmd_id += 1
             logger.info(
-                'Task ended with pickDrop pending, sending '
-                'cancelOrder for robot %s, cmd_id=%d',
-                self.name, self.cmd_id,
+                'Task ended, sending cancelOrder for robot %s, '
+                'order_id=%s, cmd_id=%d',
+                self.name, self._order.active_order_id,
+                self.cmd_id,
             )
             self.attempt_cmd_until_success(
                 cmd=self.api.stop,
