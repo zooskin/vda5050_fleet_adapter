@@ -867,13 +867,6 @@ class RobotAdapter:
         )
         from vda5050_fleet_adapter.domain.enums import BlockingType
 
-        if (
-            self._pick_drop_station_node is not None
-            and 'stationName' not in params
-            and category != 'pick'
-        ):
-            params['stationName'] = self._pick_drop_station_node
-
         current_node = find_nearest_node(
             self.nav_nodes, self.position[0], self.position[1]
         )

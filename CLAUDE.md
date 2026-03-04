@@ -189,7 +189,7 @@ pickDrop 속성이 destination의 **직전 노드**(staging node)에 있고, des
   - `_pick_drop_station_node`에 제거된 station node 저장.
   - `_pick_drop_destination`을 staging node로 설정 → 기존 pickDrop 로직 자동 적용.
   - `target`과 `_final_destination`을 staging node로 갱신 → Tier 2 확장 방지.
-- **execute_action()**: `_pick_drop_station_node`이 설정되어 있고 params에 `stationName`이 없으면 자동으로 채움. 단, `pick` action에는 stationName을 추가하지 않음.
+- **execute_action()**: `stationName`은 RMF Task 파라미터에서 직접 제공 (auto-fill 없음). `drop` action은 항상 `stationName` 포함.
 - **_build_pick_drop_order_update()**: 리셋 시 `_pick_drop_station_node = None`.
 
 ### Station Node Removal 조건
@@ -209,7 +209,6 @@ Phase 1 (navigate to pick):
 
 Phase 2 (pick action):
   RMF: execute_action('pick', {})
-  → pick에는 stationName 미포함
   VDA5050: wp2(base)→wp3(base,pick)  [order_A, updateId=1]
   → order 리셋
 
@@ -221,7 +220,7 @@ Phase 3 (navigate to drop):
 
 Phase 4 (drop action):
   RMF: execute_action('drop', {})
-  → stationName auto-fill: params = {'stationName': 'wp6'}
+  → stationName은 RMF Task params에서 제공
   VDA5050: ...→wp5(base,drop+stationName=wp6)  [order_B, updateId=1]
   → order 리셋
 ```
