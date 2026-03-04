@@ -166,6 +166,70 @@ Task 완료 → _reset_order_state()
 - `track_action_id`로 action 완료를 모니터링 (order 완료가 아닌 action 단위)
 - 로봇이 이미 pickDrop destination에 있으면 order 미생성, 즉시 완료
 
+#### Cart Delivery — Station Node Removal 모드
+
+pickDrop 속성이 destination의 **직전 노드**(staging node)에 있고, destination 자체가 실제 카트/드롭 위치(station node)인 시나리오. Station node는 VDA5050 order에서 제거되고, pick/drop action은 staging node에 부착된다. `stationName` 파라미터는 제거된 station node 이름으로 자동 채워진다.
+
+**전제**: nav_graph에서 staging node에 `pickDrop: true` 속성이 설정되어 있어야 한다.
+
+```
+RMF Task: cart_delivery (wp1 → wp3[staging,pickDrop] → wp4[station] → wp5[staging,pickDrop] → wp6[station])
+
+Phase 1: navigate(dest=wp4, final=wp4)
+  → path 계산: [wp1, wp2, wp3, wp4]
+  → station node removal: path[-2]=wp3(pickDrop) 감지
+  → wp4(station) 제거, _pick_drop_station_node=wp4
+  → path=[wp1, wp2, wp3], pickDrop dest=wp3
+  → wp3를 horizon으로 유지, wp2까지 base
+  → 도착 판정 대상 = wp2 (pre-staging)
+  ┌──────────────────────────────────────────────┐
+  │ Order (orderID=A, updateId=0)                │
+  │   wp1(base, seq=0) → wp2(base, seq=2) →     │
+  │   wp3(horizon, seq=4)                        │
+  │   ↳ wp4는 order에 미포함                      │
+  └──────────────────────────────────────────────┘
+  → wp2 거리 기반 도착 감지 → execution.finished()
+
+Phase 2: execute_action('pick', {loadType, loadID})
+  → stationName auto-fill: params = {stationName: 'wp4', ...}
+  → _build_pick_drop_order_update()
+  → 경로: wp2 → wp3, 모든 노드 base
+  → wp3에 pick nodeAction(HARD, stationName=wp4) 부착
+  ┌──────────────────────────────────────────────┐
+  │ Order Update (orderID=A, updateId=1)         │
+  │   wp2(base, seq=0) → wp3(base, seq=2,       │
+  │     actions=[pick{HARD, stationName=wp4}])   │
+  └──────────────────────────────────────────────┘
+  → Order 라이프사이클 리셋
+
+Phase 3: navigate(dest=wp6, final=wp6)
+  → station node removal: wp5(pickDrop) 감지, wp6 제거
+  → path=[..., wp5], pickDrop dest=wp5
+  ┌──────────────────────────────────────────────┐
+  │ Order (orderID=B, updateId=0)                │
+  │   wp3(base) → ... → wp5(horizon)             │
+  │   ↳ wp6는 order에 미포함                      │
+  └──────────────────────────────────────────────┘
+
+Phase 4: execute_action('drop', {})
+  → stationName auto-fill: params = {stationName: 'wp6'}
+  → _build_pick_drop_order_update()
+  ┌──────────────────────────────────────────────┐
+  │ Order Update (orderID=B, updateId=1)         │
+  │   ...→ wp5(base, actions=[drop{HARD,         │
+  │     stationName=wp6}])                       │
+  └──────────────────────────────────────────────┘
+  → Order 라이프사이클 리셋
+
+Task 완료 → _reset_order_state()
+```
+
+핵심 구현 사항:
+- path[-2]가 pickDrop이면 path[-1](station node)을 경로에서 제거 (charging 패턴 동일)
+- `_pick_drop_station_node`에 제거된 station node 이름 저장
+- `execute_action()`에서 `stationName`이 params에 없으면 자동으로 `_pick_drop_station_node` 값 채움
+- dest 자체에 pickDrop이 있는 기존 시나리오와 충돌하지 않음 (`_pick_drop_destination is None` 체크)
+
 ### Charging Actions
 
 | actionType | blockingType | 전달 방식 | 설명 | actionParameters |

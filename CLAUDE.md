@@ -181,6 +181,51 @@ Phase 4 (drop):     wp2(base,seq=0) → wp3(base,seq=2,drop) [order_B, updateId=
 - **go_to_place 리셋**: pickDrop pending 상태에서 task 종료 → `_reset_order_state()`에서 cancelOrder 전송.
 - **nav_graph 설정**: pickup/dropoff 스테이션에 `pickDrop: true` 속성 필수.
 
+## pickDrop Station Node Removal (구현 완료)
+pickDrop 속성이 destination의 **직전 노드**(staging node)에 있고, destination 자체는 실제 카트/드롭 위치(station node)인 시나리오. Charging 패턴과 동일하게 station node를 VDA5050 order에서 제거.
+
+### 동작 원리
+- **navigate()**: path[-2]가 pickDrop이면 path[-1](station node)을 제거, staging node까지만 경로 생성.
+  - `_pick_drop_station_node`에 제거된 station node 저장.
+  - `_pick_drop_destination`을 staging node로 설정 → 기존 pickDrop 로직 자동 적용.
+  - `target`과 `_final_destination`을 staging node로 갱신 → Tier 2 확장 방지.
+- **execute_action()**: `_pick_drop_station_node`이 설정되어 있고 params에 `stationName`이 없으면 자동으로 채움.
+- **_build_pick_drop_order_update()**: 리셋 시 `_pick_drop_station_node = None`.
+
+### Station Node Removal 조건
+- `_pick_drop_destination is None` (dest 자체에 pickDrop이 있는 기존 시나리오와 충돌 방지)
+- `len(path) >= 2`
+- `path[-2]`의 nav_graph 속성에 `pickDrop: True`
+
+### Order 예시 (Station Node Removal)
+```
+경로: wp1-wp2-wp3(pickDrop)-wp4(station)-wp3-wp2-wp5(pickDrop)-wp6(station)
+
+Phase 1 (navigate to pick):
+  RMF: navigate(dest=wp4)
+  → station node wp4 제거, path=[wp1,wp2,wp3]
+  VDA5050: wp1(base)→wp2(base)→wp3(horizon)  [order_A, updateId=0]
+  → wp2 도착 → execution.finished()
+
+Phase 2 (pick action):
+  RMF: execute_action('pick', {})
+  → stationName auto-fill: params = {'stationName': 'wp4'}
+  VDA5050: wp2(base)→wp3(base,pick+stationName=wp4)  [order_A, updateId=1]
+  → order 리셋
+
+Phase 3 (navigate to drop):
+  RMF: navigate(dest=wp6)
+  → station node wp6 제거, path=[...,wp5]
+  VDA5050: wp3(base)→...→wp5(horizon)  [order_B, updateId=0]
+  → pre-staging 도착 → execution.finished()
+
+Phase 4 (drop action):
+  RMF: execute_action('drop', {})
+  → stationName auto-fill: params = {'stationName': 'wp6'}
+  VDA5050: ...→wp5(base,drop+stationName=wp6)  [order_B, updateId=1]
+  → order 리셋
+```
+
 ## Robot Connection 관리 (구현 완료)
 - VDA5050 connection topic을 구독하여 로봇별 연결 상태(`ConnectionState`)를 캐싱.
 - `is_robot_connected()`: navigate 등 명령 전송 전 pre-flight check. 미연결 시 `RETRY` 반환.

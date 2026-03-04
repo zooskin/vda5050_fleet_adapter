@@ -114,6 +114,7 @@ class RobotAdapter:
 
         # pickDrop 상태 관리
         self._pick_drop_destination: str | None = None
+        self._pick_drop_station_node: str | None = None
 
     def update(self, state: Any, data: RobotUpdateData) -> None:
         """주기적 상태 업데이트.
@@ -479,6 +480,29 @@ class RobotAdapter:
         if path is None:
             path = [start_node, target]
 
+        # Station node removal: path[-2]가 pickDrop이면
+        # station(path[-1])을 경로에서 제거 (charging 패턴 동일)
+        if (
+            self._pick_drop_destination is None
+            and len(path) >= 2
+        ):
+            pre_dest = path[-2]
+            pre_dest_attrs = self.nav_nodes.get(
+                pre_dest, {}
+            ).get('attributes', {})
+            if pre_dest_attrs.get('pickDrop', False):
+                self._pick_drop_station_node = path[-1]
+                self._pick_drop_destination = pre_dest
+                path = path[:-1]
+                target = pre_dest
+                self._final_destination = pre_dest
+                logger.info(
+                    'Station node removal for %s: removed %s, '
+                    'pickDrop staging=%s',
+                    self.name, self._pick_drop_station_node,
+                    pre_dest,
+                )
+
         # pickDrop: 로봇이 이미 destination에 있는 경우 조기 리턴
         if (
             self._pick_drop_destination is not None
@@ -843,6 +867,12 @@ class RobotAdapter:
         )
         from vda5050_fleet_adapter.domain.enums import BlockingType
 
+        if (
+            self._pick_drop_station_node is not None
+            and 'stationName' not in params
+        ):
+            params['stationName'] = self._pick_drop_station_node
+
         current_node = find_nearest_node(
             self.nav_nodes, self.position[0], self.position[1]
         )
@@ -1028,6 +1058,7 @@ class RobotAdapter:
         self._order_update_id = 0
         self._last_stitch_seq_id = 0
         self._pick_drop_destination = None
+        self._pick_drop_station_node = None
 
     def attempt_cmd_until_success(
         self, cmd: Any, args: tuple
@@ -1135,6 +1166,7 @@ class RobotAdapter:
 
         if self._pick_drop_destination is not None:
             self._pick_drop_destination = None
+            self._pick_drop_station_node = None
             self.cmd_id += 1
             logger.info(
                 'Task ended with pickDrop pending, sending '
@@ -1153,6 +1185,7 @@ class RobotAdapter:
         self._is_charging_pending = False
         self._charging_station_name = None
         self._charging_action_id = None
+        self._pick_drop_station_node = None
         # _was_charging은 보존: 다음 order에서 stopCharging 전송 필요
 
         old_task_id = self._current_task_id
