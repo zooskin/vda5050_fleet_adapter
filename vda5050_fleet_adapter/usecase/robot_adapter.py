@@ -112,6 +112,9 @@ class RobotAdapter:
         # Commission 상태 추적
         self._last_commission: Any | None = None
 
+        # pickDrop 상태 관리
+        self._pick_drop_destination: str | None = None
+
     def update(self, state: Any, data: RobotUpdateData) -> None:
         """주기적 상태 업데이트.
 
@@ -329,6 +332,13 @@ class RobotAdapter:
             self._is_charging_pending = False
             self._charging_station_name = None
 
+        # pickDrop 감지: nav_graph 속성 pickDrop으로 판단
+        dest_is_pick_drop = dest_node_attrs.get('pickDrop', False)
+        if dest_is_pick_drop and dest_name_raw:
+            self._pick_drop_destination = dest_name_raw
+        else:
+            self._pick_drop_destination = None
+
         self.node.get_logger().info(
             f'[{self.name}] navigate callback called, '
             f'dest={destination.position}, map={destination.map}, '
@@ -469,6 +479,23 @@ class RobotAdapter:
         if path is None:
             path = [start_node, target]
 
+        # pickDrop: 로봇이 이미 destination에 있는 경우 조기 리턴
+        if (
+            self._pick_drop_destination is not None
+            and len(path) == 1
+            and path[0] == self._pick_drop_destination
+        ):
+            self._active_order_id = None
+            self._is_navigating = False
+            self.execution.finished()
+            self.execution = None
+            logger.info(
+                'Robot %s already at pickDrop destination %s, '
+                'completing immediately',
+                self.name, self._pick_drop_destination,
+            )
+            return
+
         # ── Step 2: 3-tier 경로 구성 (경로 조립 관점) ──
         # tier 1 (Horizon - RMF 경로):      path[0 : rmf_path_end+1]
         # tier 2 (Horizon - 최종목적지 확장): path[rmf_path_end+1 :]
@@ -507,6 +534,27 @@ class RobotAdapter:
             base_end_index = path.index(goal_node)
         else:
             base_end_index = len(path) - 1
+
+        # ── pickDrop: dest를 horizon으로 유지, 직전 노드까지 base ──
+        if (
+            self._pick_drop_destination is not None
+            and len(path) >= 2
+            and base_end_index >= 1
+        ):
+            base_end_index -= 1
+            pre_pick_drop = path[base_end_index]
+            self._navigate_target_position = [
+                self.nav_nodes[pre_pick_drop]['x'],
+                self.nav_nodes[pre_pick_drop]['y'],
+            ]
+            logger.info(
+                'pickDrop: base_end adjusted for robot %s, '
+                'pre_dest=%s, pick_drop_dest=%s, '
+                'base_end_index=%d',
+                self.name, pre_pick_drop,
+                self._pick_drop_destination,
+                base_end_index,
+            )
 
         # ── Charging: charger 노드 제거 + pre-charger에 도착 타겟 변경 ──
         if self._is_charging_pending and len(path) >= 2:
@@ -779,7 +827,11 @@ class RobotAdapter:
     ) -> None:
         """Active order에 nodeAction을 추가하는 order update를 전송한다.
 
-        현재 위치의 노드에 action을 HARD blocking으로 첨부하여
+        pickDrop destination이 설정된 경우: 현재 노드 → pickDrop dest로
+        모든 노드를 base로 전송, action을 마지막 노드에 부착 후
+        order 라이프사이클을 리셋한다.
+
+        그 외: 현재 위치의 노드에 action을 HARD blocking으로 첨부하여
         order update로 전송한다. 완료 추적은 action_id 기반.
 
         Args:
@@ -816,6 +868,30 @@ class RobotAdapter:
 
         self._order_update_id += 1
 
+        if self._pick_drop_destination is not None:
+            self._build_pick_drop_order_update(
+                current_node, action, action_id, category,
+            )
+        else:
+            self._build_default_order_update(
+                current_node, action, action_id, category,
+            )
+
+    def _build_default_order_update(
+        self,
+        current_node: str,
+        action: Any,
+        action_id: str,
+        category: str,
+    ) -> None:
+        """기본 order update: 현재 노드(Base) + 최종목적지(Horizon).
+
+        Args:
+            current_node: 현재 위치 노드.
+            action: VDA5050 Action 객체.
+            action_id: action 추적용 ID.
+            category: 액션 종류.
+        """
         # 경로 구성: 현재 노드 (Base) + 최종 목적지까지 Horizon
         path = [current_node]
         if (
@@ -870,6 +946,88 @@ class RobotAdapter:
             ),
             args=nav_args,
         )
+
+    def _build_pick_drop_order_update(
+        self,
+        current_node: str,
+        action: Any,
+        action_id: str,
+        category: str,
+    ) -> None:
+        """Build pick/drop order update with all nodes as base.
+
+        전송 후 order 라이프사이클을 리셋하여 다음 navigate가
+        새 orderID를 생성하도록 한다.
+
+        Args:
+            current_node: 현재 위치 노드.
+            action: VDA5050 Action 객체.
+            action_id: action 추적용 ID.
+            category: 액션 종류.
+        """
+        pick_drop_dest = self._pick_drop_destination
+
+        # 경로: 현재 노드 → pickDrop destination
+        if current_node == pick_drop_dest:
+            path = [current_node]
+        else:
+            computed = compute_path(
+                self.nav_graph, current_node, pick_drop_dest,
+            )
+            if computed and len(computed) > 0:
+                path = computed
+            else:
+                path = [current_node, pick_drop_dest]
+
+        map_name = self._last_map or 'map1'
+        seq_start = self._last_stitch_seq_id
+        base_end_index = len(path) - 1  # 모든 노드 base
+
+        vda_nodes, vda_edges = build_vda5050_nodes_edges(
+            path, self.nav_nodes, map_name,
+            base_end_index=base_end_index,
+            seq_start=seq_start,
+            edges=self.nav_edges,
+        )
+
+        # 마지막 노드(pickDrop dest)에 action 첨부
+        vda_nodes[-1].actions.append(action)
+
+        # nav_args에 order_id를 미리 캡처 (리셋 전)
+        order_id = self._active_order_id
+        update_id = self._order_update_id
+
+        logger.info(
+            'pickDrop action order update [%s]: category=%s, '
+            'action_id=%s, order_id=%s, update_id=%d, '
+            'dest=%s, path=%s',
+            self.name, category, action_id,
+            order_id, update_id,
+            pick_drop_dest, path,
+        )
+
+        nav_args = (
+            self.name,
+            self.cmd_id,
+            vda_nodes,
+            vda_edges,
+            map_name,
+            order_id,
+            update_id,
+        )
+
+        self.attempt_cmd_until_success(
+            cmd=lambda *a: self.api.navigate(
+                *a, track_action_id=action_id
+            ),
+            args=nav_args,
+        )
+
+        # Order 라이프사이클 리셋: 다음 navigate가 새 orderID 생성
+        self._active_order_id = None
+        self._order_update_id = 0
+        self._last_stitch_seq_id = 0
+        self._pick_drop_destination = None
 
     def attempt_cmd_until_success(
         self, cmd: Any, args: tuple
@@ -968,6 +1126,19 @@ class RobotAdapter:
             logger.info(
                 'Task ended while paused, sending cancelOrder '
                 'for robot %s, cmd_id=%d',
+                self.name, self.cmd_id,
+            )
+            self.attempt_cmd_until_success(
+                cmd=self.api.stop,
+                args=(self.name, self.cmd_id),
+            )
+
+        if self._pick_drop_destination is not None:
+            self._pick_drop_destination = None
+            self.cmd_id += 1
+            logger.info(
+                'Task ended with pickDrop pending, sending '
+                'cancelOrder for robot %s, cmd_id=%d',
                 self.name, self.cmd_id,
             )
             self.attempt_cmd_until_success(

@@ -3111,3 +3111,307 @@ class TestChargingDecommission:
         charging_adapter._reset_order_state()
 
         assert charging_adapter._is_charging_decommissioned is True
+
+
+class TestPickDropFlow:
+    """pickDrop Base/Horizon 분리 테스트.
+
+    pickDrop=True 속성이 있는 destination 노드를 horizon으로 유지하고,
+    execute_action에서 released로 전환 + action 부착.
+    Phase 1+2 = order_A, Phase 3+4 = order_B (별도 orderID).
+
+    Graph:
+        wp1(0,0) --- wp2(5,0) --- wp3(5,5)
+        wp2: pickDrop=True (pickup station)
+        wp3: pickDrop=True (dropoff station)
+    """
+
+    @pytest.fixture
+    def pick_drop_adapter(self, mock_api, mock_node):
+        """Create adapter with pick_drop node attributes."""
+        from vda5050_fleet_adapter.infra.nav_graph.graph_utils import (
+            create_graph,
+        )
+        nodes = {
+            'wp1': {'x': 0.0, 'y': 0.0, 'attributes': {}},
+            'wp2': {
+                'x': 5.0, 'y': 0.0,
+                'attributes': {'pickDrop': True},
+            },
+            'wp3': {
+                'x': 5.0, 'y': 5.0,
+                'attributes': {'pickDrop': True},
+            },
+            'wp4': {'x': 0.0, 'y': 5.0, 'attributes': {}},
+        }
+        edges = {
+            'e0': {'start': 'wp1', 'end': 'wp2', 'attributes': {}},
+            'e1': {'start': 'wp2', 'end': 'wp1', 'attributes': {}},
+            'e2': {'start': 'wp2', 'end': 'wp3', 'attributes': {}},
+            'e3': {'start': 'wp3', 'end': 'wp2', 'attributes': {}},
+            'e4': {'start': 'wp3', 'end': 'wp4', 'attributes': {}},
+            'e5': {'start': 'wp4', 'end': 'wp3', 'attributes': {}},
+            'e6': {'start': 'wp4', 'end': 'wp1', 'attributes': {}},
+            'e7': {'start': 'wp1', 'end': 'wp4', 'attributes': {}},
+        }
+        graph = create_graph(nodes, edges)
+        robot = RobotAdapter(
+            name='AGV-001', api=mock_api, node=mock_node,
+            fleet_handle=MagicMock(),
+            nav_nodes=nodes, nav_edges=edges, nav_graph=graph,
+        )
+        robot.configuration = MagicMock()
+        mock_handle = MagicMock()
+        mock_handle.more.return_value.current_task_id \
+            .return_value = 'cart-delivery-001'
+        robot.update_handle = mock_handle
+        robot.position = [0.0, 0.0, 0.0]
+        return robot
+
+    def test_pickdrop_navigate_base_horizon_split(
+        self, pick_drop_adapter, mock_api
+    ):
+        """Destination with pickDrop is horizon, preceding node is base."""
+        dest = MagicMock()
+        dest.name = 'wp2'
+        dest.final_name = 'wp2'
+        dest.position = [5.0, 0.0, 0.0]
+        dest.map = 'map1'
+
+        pick_drop_adapter.navigate(dest, MagicMock())
+        pick_drop_adapter.cancel_cmd_attempt()
+
+        nodes = mock_api.navigate.call_args[0][2]
+        node_ids = [n.node_id for n in nodes]
+
+        assert node_ids == ['wp1', 'wp2']
+        # wp1 = base (released), wp2 = horizon (not released)
+        assert nodes[0].released is True
+        assert nodes[1].released is False
+
+    def test_pickdrop_navigate_target_pre_dest(
+        self, pick_drop_adapter, mock_api
+    ):
+        """Navigate target position is set to pre-destination node."""
+        dest = MagicMock()
+        dest.name = 'wp2'
+        dest.final_name = 'wp2'
+        dest.position = [5.0, 0.0, 0.0]
+        dest.map = 'map1'
+
+        pick_drop_adapter.navigate(dest, MagicMock())
+        pick_drop_adapter.cancel_cmd_attempt()
+
+        # wp1(0,0) 좌표가 도착 판정 대상
+        assert pick_drop_adapter._navigate_target_position == [
+            0.0, 0.0,
+        ]
+
+    def test_pickdrop_action_releases_dest(
+        self, pick_drop_adapter, mock_api
+    ):
+        """Action order update releases all nodes, action on last node."""
+        # Phase 1: navigate to wp2
+        dest = MagicMock()
+        dest.name = 'wp2'
+        dest.final_name = 'wp2'
+        dest.position = [5.0, 0.0, 0.0]
+        dest.map = 'map1'
+        pick_drop_adapter.navigate(dest, MagicMock())
+        pick_drop_adapter.cancel_cmd_attempt()
+        mock_api.navigate.reset_mock()
+
+        # Phase 2: pick action
+        pick_drop_adapter.position = [0.0, 0.0, 0.0]  # at wp1
+        pick_drop_adapter.execute_action(
+            'pick', {'loadType': 'Tool'}, MagicMock()
+        )
+        pick_drop_adapter.cancel_cmd_attempt()
+
+        nodes = mock_api.navigate.call_args[0][2]
+
+        # 모든 노드 base (released)
+        for node in nodes:
+            assert node.released is True, (
+                f'{node.node_id} should be released'
+            )
+
+        # action이 마지막 노드(wp2)에 부착
+        last_node = nodes[-1]
+        assert len(last_node.actions) == 1
+        assert last_node.actions[0].action_type == 'pick'
+        assert last_node.actions[0].blocking_type.value == 'HARD'
+
+    def test_pickdrop_action_resets_order(
+        self, pick_drop_adapter, mock_api
+    ):
+        """Order lifecycle resets after pick_drop action."""
+        dest = MagicMock()
+        dest.name = 'wp2'
+        dest.final_name = 'wp2'
+        dest.position = [5.0, 0.0, 0.0]
+        dest.map = 'map1'
+        pick_drop_adapter.navigate(dest, MagicMock())
+        pick_drop_adapter.cancel_cmd_attempt()
+
+        assert pick_drop_adapter._active_order_id is not None
+
+        pick_drop_adapter.position = [0.0, 0.0, 0.0]
+        pick_drop_adapter.execute_action('pick', {}, MagicMock())
+        pick_drop_adapter.cancel_cmd_attempt()
+
+        assert pick_drop_adapter._active_order_id is None
+        assert pick_drop_adapter._order_update_id == 0
+        assert pick_drop_adapter._last_stitch_seq_id == 0
+        assert pick_drop_adapter._pick_drop_destination is None
+
+    def test_pickdrop_full_cart_delivery(
+        self, pick_drop_adapter, mock_api
+    ):
+        """Phase1+2=orderA, Phase3+4=orderB (다른 orderID)."""
+        # Phase 1: navigate to wp2 (pickup)
+        dest1 = MagicMock()
+        dest1.name = 'wp2'
+        dest1.final_name = 'wp2'
+        dest1.position = [5.0, 0.0, 0.0]
+        dest1.map = 'map1'
+        pick_drop_adapter.navigate(dest1, MagicMock())
+        pick_drop_adapter.cancel_cmd_attempt()
+
+        order_a = pick_drop_adapter._active_order_id
+        assert order_a is not None
+        assert pick_drop_adapter._order_update_id == 0
+
+        # Phase 2: pick action at wp2
+        pick_drop_adapter.position = [0.0, 0.0, 0.0]
+        pick_drop_adapter.execute_action(
+            'pick', {'loadType': 'Tool'}, MagicMock()
+        )
+        pick_drop_adapter.cancel_cmd_attempt()
+
+        # order 리셋됨
+        assert pick_drop_adapter._active_order_id is None
+
+        # Phase 3: navigate to wp3 (dropoff)
+        pick_drop_adapter.position = [5.0, 0.0, 0.0]
+        dest2 = MagicMock()
+        dest2.name = 'wp3'
+        dest2.final_name = 'wp3'
+        dest2.position = [5.0, 5.0, 0.0]
+        dest2.map = 'map1'
+        pick_drop_adapter.navigate(dest2, MagicMock())
+        pick_drop_adapter.cancel_cmd_attempt()
+
+        order_b = pick_drop_adapter._active_order_id
+        assert order_b is not None
+        assert order_b != order_a  # 다른 orderID
+        assert pick_drop_adapter._order_update_id == 0
+
+        # Phase 4: drop action at wp3
+        pick_drop_adapter.position = [5.0, 0.0, 0.0]
+        pick_drop_adapter.execute_action(
+            'drop', {'stationName': 'wp3'}, MagicMock()
+        )
+        pick_drop_adapter.cancel_cmd_attempt()
+
+        # order 리셋됨
+        assert pick_drop_adapter._active_order_id is None
+
+    def test_pickdrop_robot_at_destination(
+        self, pick_drop_adapter, mock_api
+    ):
+        """로봇이 이미 pickDrop dest에 있으면 즉시 완료."""
+        pick_drop_adapter.position = [5.0, 0.0, 0.0]  # at wp2
+
+        dest = MagicMock()
+        dest.name = 'wp2'
+        dest.final_name = 'wp2'
+        dest.position = [5.0, 0.0, 0.0]
+        dest.map = 'map1'
+        dest.waypoint_names = ['wp2']
+        execution = MagicMock()
+
+        pick_drop_adapter.navigate(dest, execution)
+
+        # order 미생성, 즉시 완료
+        execution.finished.assert_called_once()
+        assert pick_drop_adapter.execution is None
+        assert pick_drop_adapter._is_navigating is False
+        mock_api.navigate.assert_not_called()
+
+    def test_pickdrop_go_to_place_reset(
+        self, pick_drop_adapter, mock_api
+    ):
+        """Task end with pick_drop pending sends cancelOrder."""
+        dest = MagicMock()
+        dest.name = 'wp2'
+        dest.final_name = 'wp2'
+        dest.position = [5.0, 0.0, 0.0]
+        dest.map = 'map1'
+        pick_drop_adapter.navigate(dest, MagicMock())
+        pick_drop_adapter.cancel_cmd_attempt()
+
+        assert pick_drop_adapter._pick_drop_destination == 'wp2'
+
+        pick_drop_adapter._reset_order_state()
+        pick_drop_adapter.cancel_cmd_attempt()
+
+        # cancelOrder 전송됨
+        mock_api.stop.assert_called_once()
+        assert pick_drop_adapter._pick_drop_destination is None
+
+    def test_pickdrop_seq_continuity(
+        self, pick_drop_adapter, mock_api
+    ):
+        """Sequence ID continuity within pick_drop order."""
+        dest = MagicMock()
+        dest.name = 'wp2'
+        dest.final_name = 'wp2'
+        dest.position = [5.0, 0.0, 0.0]
+        dest.map = 'map1'
+        pick_drop_adapter.navigate(dest, MagicMock())
+        pick_drop_adapter.cancel_cmd_attempt()
+
+        # Phase 1 nodes
+        nav_nodes = mock_api.navigate.call_args[0][2]
+        nav_edges = mock_api.navigate.call_args[0][3]
+        # seq: wp1=0, edge=1, wp2=2
+        assert nav_nodes[0].sequence_id == 0
+        assert nav_nodes[1].sequence_id == 2
+        if nav_edges:
+            assert nav_edges[0].sequence_id == 1
+
+        mock_api.navigate.reset_mock()
+
+        # Phase 2: pick action
+        pick_drop_adapter.position = [0.0, 0.0, 0.0]
+        pick_drop_adapter.execute_action('pick', {}, MagicMock())
+        pick_drop_adapter.cancel_cmd_attempt()
+
+        action_nodes = mock_api.navigate.call_args[0][2]
+        # stitch_seq was 0 (base_end_index=0 → wp1)
+        # action update: seq starts from 0
+        assert action_nodes[0].sequence_id == 0
+
+    def test_non_pickdrop_unaffected(
+        self, pick_drop_adapter, mock_api
+    ):
+        """Nodes without pickDrop attribute keep default behavior."""
+        pick_drop_adapter.position = [5.0, 0.0, 0.0]  # at wp2
+
+        dest = MagicMock()
+        dest.name = 'wp4'
+        dest.final_name = 'wp4'
+        dest.position = [0.0, 5.0, 0.0]
+        dest.map = 'map1'
+
+        pick_drop_adapter.navigate(dest, MagicMock())
+        pick_drop_adapter.cancel_cmd_attempt()
+
+        nodes = mock_api.navigate.call_args[0][2]
+        # wp4에 pickDrop 없으므로 모든 노드 base
+        for node in nodes:
+            assert node.released is True, (
+                f'{node.node_id} should be released (no pickDrop)'
+            )
+        assert pick_drop_adapter._pick_drop_destination is None
