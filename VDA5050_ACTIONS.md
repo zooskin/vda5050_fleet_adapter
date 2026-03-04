@@ -95,61 +95,139 @@ Action은 3가지 방식으로 AGV에 전달된다:
 |-----------|------|------|------|------|
 | `stationName` | string | 하역할 스테이션 이름 | `"1004"` | Task 매개변수 |
 
-#### Cart Delivery (pick/drop) 시퀀스
+#### Cart Delivery (pick/drop) 시퀀스 — pickDrop 모드
 
 Cart delivery는 pickup → dropoff 2개의 phase로 구성된다.
-**전체 과정이 1개의 orderID**로 처리되며, 각 phase마다 `order_update_id`가 증가한다.
+`pickDrop: true` 속성이 있는 노드에서는 **Phase 1+2 = order_A, Phase 3+4 = order_B**로
+2개의 orderID를 사용한다. pickDrop destination은 navigate 시 horizon으로 유지되어
+order가 살아있는 상태에서 execute_action이 released로 전환한다.
+
+**전제**: nav_graph에서 pickup/dropoff 스테이션에 `pickDrop: true` 속성이 설정되어 있어야 한다.
 
 ```
-RMF Task: cart_delivery (wp1 → wp2[pickup] → wp3[dropoff])
+RMF Task: cart_delivery (wp1 → wp2[pickup, pickDrop] → wp3[dropoff, pickDrop])
 
 Phase 1: navigate(dest=wp2, final=wp2)
-  → 새 orderID 생성, order_update_id=0
-  → VDA5050 Order 전송
+  → 새 orderID 생성 (order_A), order_update_id=0
+  → pickDrop 감지 → wp2를 horizon으로 유지
+  → 도착 판정 대상 = wp1 (직전 노드)
   ┌──────────────────────────────────────────────┐
-  │ Order (orderID=X, updateId=0)                │
-  │   wp1(base) → wp2(base)                      │
+  │ Order (orderID=A, updateId=0)                │
+  │   wp1(base, seq=0) → wp2(horizon, seq=2)     │
   └──────────────────────────────────────────────┘
-  → 거리 기반 도착 감지 → execution.finished()
+  → wp1 거리 기반 도착 감지 → execution.finished()
 
 Phase 2: execute_action('pick', {loadType, loadID})
-  → active order 존재 → Order Update로 전송 (instantAction 아님)
+  → active order 존재 + pickDrop → _build_pick_drop_order_update()
   → order_update_id++ (=1)
-  → 현재 노드(wp2)에 pick nodeAction(HARD) 부착
+  → 경로: wp1 → wp2, 모든 노드 base (released)
+  → wp2에 pick nodeAction(HARD) 부착
   ┌──────────────────────────────────────────────┐
-  │ Order Update (orderID=X, updateId=1)         │
-  │   wp2(base, actions=[pick{HARD}])            │
+  │ Order Update (orderID=A, updateId=1)         │
+  │   wp1(base, seq=0) → wp2(base, seq=2,       │
+  │     actions=[pick{HARD}])                     │
   │   ↳ track_action_id로 완료 추적              │
   └──────────────────────────────────────────────┘
+  → Order 라이프사이클 리셋 (_active_order_id = None)
   → AGV의 actionStates에서 action_id FINISHED 감지 → execution.finished()
 
 Phase 3: navigate(dest=wp3, final=wp3)
-  → 같은 orderID, order_update_id++ (=2)
+  → 새 orderID 생성 (order_B), order_update_id=0
+  → pickDrop 감지 → wp3를 horizon으로 유지
+  → 도착 판정 대상 = wp2 (직전 노드)
   ┌──────────────────────────────────────────────┐
-  │ Order Update (orderID=X, updateId=2)         │
-  │   wp2(base) → wp3(base)                      │
-  │   ↳ sequenceId는 이전 stitching point에서 연속 │
+  │ Order (orderID=B, updateId=0)                │
+  │   wp2(base, seq=0) → wp3(horizon, seq=2)     │
   └──────────────────────────────────────────────┘
-  → 거리 기반 도착 감지 → execution.finished()
+  → wp2 거리 기반 도착 감지 → execution.finished()
 
 Phase 4: execute_action('drop', {stationName})
-  → Order Update (nodeAction)
-  → order_update_id++ (=3)
+  → active order 존재 + pickDrop → _build_pick_drop_order_update()
+  → order_update_id++ (=1)
+  → 경로: wp2 → wp3, 모든 노드 base (released)
+  → wp3에 drop nodeAction(HARD) 부착
   ┌──────────────────────────────────────────────┐
-  │ Order Update (orderID=X, updateId=3)         │
-  │   wp3(base, actions=[drop{HARD}])            │
+  │ Order Update (orderID=B, updateId=1)         │
+  │   wp2(base, seq=0) → wp3(base, seq=2,       │
+  │     actions=[drop{HARD}])                     │
   │   ↳ track_action_id로 완료 추적              │
   └──────────────────────────────────────────────┘
+  → Order 라이프사이클 리셋 (_active_order_id = None)
   → AGV의 actionStates에서 action_id FINISHED 감지 → execution.finished()
 
 Task 완료 → _reset_order_state()
 ```
 
 핵심 구현 사항:
-- `execute_action()` 호출 시 `_active_order_id`가 존재하면 `_execute_action_as_order_update()`로 처리
-- 현재 위치의 nearest node에 action을 `BlockingType.HARD`로 첨부
+- `pickDrop: true` 속성이 있는 destination → navigate에서 horizon 유지, 직전 노드까지 base
+- `execute_action()` 호출 시 `_pick_drop_destination`이 설정되면 `_build_pick_drop_order_update()` 사용
+- `_build_pick_drop_order_update()`: 모든 노드 base, action을 마지막 노드에 부착, 전송 후 order 리셋
+- Phase 1+2 = order_A, Phase 3+4 = order_B (별도 orderID)
 - `track_action_id`로 action 완료를 모니터링 (order 완료가 아닌 action 단위)
-- sequenceId는 `_last_stitch_seq_id`로 order update 간 연속성 유지
+- 로봇이 이미 pickDrop destination에 있으면 order 미생성, 즉시 완료
+
+#### Cart Delivery — Station Node Removal 모드
+
+pickDrop 속성이 destination의 **직전 노드**(staging node)에 있고, destination 자체가 실제 카트/드롭 위치(station node)인 시나리오. Station node는 VDA5050 order에서 제거되고, pick/drop action은 staging node에 부착된다. `stationName` 파라미터는 제거된 station node 이름으로 자동 채워진다.
+
+**전제**: nav_graph에서 staging node에 `pickDrop: true` 속성이 설정되어 있어야 한다.
+
+```
+RMF Task: cart_delivery (wp1 → wp3[staging,pickDrop] → wp4[station] → wp5[staging,pickDrop] → wp6[station])
+
+Phase 1: navigate(dest=wp4, final=wp4)
+  → path 계산: [wp1, wp2, wp3, wp4]
+  → station node removal: path[-2]=wp3(pickDrop) 감지
+  → wp4(station) 제거, _pick_drop_station_node=wp4
+  → path=[wp1, wp2, wp3], pickDrop dest=wp3
+  → wp3를 horizon으로 유지, wp2까지 base
+  → 도착 판정 대상 = wp2 (pre-staging)
+  ┌──────────────────────────────────────────────┐
+  │ Order (orderID=A, updateId=0)                │
+  │   wp1(base, seq=0) → wp2(base, seq=2) →     │
+  │   wp3(horizon, seq=4)                        │
+  │   ↳ wp4는 order에 미포함                      │
+  └──────────────────────────────────────────────┘
+  → wp2 거리 기반 도착 감지 → execution.finished()
+
+Phase 2: execute_action('pick', {loadType, loadID})
+  → _build_pick_drop_order_update()
+  → 경로: wp2 → wp3, 모든 노드 base
+  → wp3에 pick nodeAction(HARD) 부착
+  ┌──────────────────────────────────────────────┐
+  │ Order Update (orderID=A, updateId=1)         │
+  │   wp2(base, seq=0) → wp3(base, seq=2,       │
+  │     actions=[pick{HARD}])                    │
+  └──────────────────────────────────────────────┘
+  → Order 라이프사이클 리셋
+
+Phase 3: navigate(dest=wp6, final=wp6)
+  → station node removal: wp5(pickDrop) 감지, wp6 제거
+  → path=[..., wp5], pickDrop dest=wp5
+  ┌──────────────────────────────────────────────┐
+  │ Order (orderID=B, updateId=0)                │
+  │   wp3(base) → ... → wp5(horizon)             │
+  │   ↳ wp6는 order에 미포함                      │
+  └──────────────────────────────────────────────┘
+
+Phase 4: execute_action('drop', {stationName: 'wp6'})
+  → stationName은 RMF Task params에서 제공
+  → _build_pick_drop_order_update()
+  ┌──────────────────────────────────────────────┐
+  │ Order Update (orderID=B, updateId=1)         │
+  │   ...→ wp5(base, actions=[drop{HARD,         │
+  │     stationName=wp6}])                       │
+  └──────────────────────────────────────────────┘
+  → Order 라이프사이클 리셋
+
+Task 완료 → _reset_order_state()
+```
+
+핵심 구현 사항:
+- path[-2]가 pickDrop이면 path[-1](station node)을 경로에서 제거 (charging 패턴 동일)
+- `_pick_drop_station_node`에 제거된 station node 이름 저장
+- `stationName`은 RMF Task 파라미터에서 직접 제공 (auto-fill 없음). `drop` action은 항상 `stationName` 포함
+- dest 자체에 pickDrop이 있는 기존 시나리오와 충돌하지 않음 (`_pick_drop_destination is None` 체크)
 
 ### Charging Actions
 

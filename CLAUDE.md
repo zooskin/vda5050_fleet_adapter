@@ -151,6 +151,80 @@ rmf에서 negotiation이 발생하면 아래 순서를 따른다:
 - 현재 노드만 Base(released), 최종 목적지까지의 나머지 경로는 Horizon으로 구성.
 - `track_action_id`를 사용하여 action 완료를 추적 (order_id가 아닌 action_id로 모니터링).
 
+## pickDrop Base/Horizon 분리 (구현 완료)
+nav_graph에서 `pickDrop: true` 속성이 있는 destination 노드의 경우:
+
+### 동작 원리
+- **navigate()**: pickDrop destination을 horizon(unreleased)으로 유지, 직전 노드까지만 base. 도착 판정도 직전 노드 좌표 기준.
+- **execute_action()**: `_pick_drop_destination`이 설정된 경우 `_build_pick_drop_order_update()` 사용:
+  - 경로: current_node → pickDrop destination (compute_path 사용)
+  - 모든 노드 base (released). Action을 마지막 노드(pickDrop dest)에 부착.
+  - 전송 후 order 라이프사이클 즉시 리셋 (`_active_order_id = None` 등).
+- **로봇이 이미 dest에 있는 경우**: path가 [dest] 1개이면 order 미생성, 즉시 `execution.finished()`.
+
+### Order Lifecycle
+- Phase 1 (navigate to pickup) + Phase 2 (pick action) = **order_A**
+- Phase 3 (navigate to dropoff) + Phase 4 (drop action) = **order_B** (별도 orderID)
+- Phase 2/4에서 `_build_pick_drop_order_update()` 실행 시 order 리셋 → Phase 3이 새 orderID 생성.
+
+### Order 예시
+```
+Phase 1 (navigate): wp1(base,seq=0) → wp2(horizon,seq=2)   [order_A, updateId=0]
+Phase 2 (pick):     wp1(base,seq=0) → wp2(base,seq=2,pick) [order_A, updateId=1]
+  → order 리셋
+Phase 3 (navigate): wp2(base,seq=0) → wp3(horizon,seq=2)   [order_B, updateId=0]
+Phase 4 (drop):     wp2(base,seq=0) → wp3(base,seq=2,drop) [order_B, updateId=1]
+  → order 리셋
+```
+
+### 엣지케이스
+- **go_to_place 리셋**: pickDrop pending 상태에서 task 종료 → `_reset_order_state()`에서 cancelOrder 전송.
+- **nav_graph 설정**: pickup/dropoff 스테이션에 `pickDrop: true` 속성 필수.
+
+## pickDrop Station Node Removal (구현 완료)
+pickDrop 속성이 destination의 **직전 노드**(staging node)에 있고, destination 자체는 실제 카트/드롭 위치(station node)인 시나리오. Charging 패턴과 동일하게 station node를 VDA5050 order에서 제거.
+
+### 동작 원리
+- **navigate()**: path[-2]가 pickDrop이면 path[-1](station node)을 제거, staging node까지만 경로 생성.
+  - `_pick_drop_station_node`에 제거된 station node 저장.
+  - `_pick_drop_destination`을 staging node로 설정 → 기존 pickDrop 로직 자동 적용.
+  - `target`과 `_final_destination`을 staging node로 갱신 → Tier 2 확장 방지.
+- **execute_action()**: `stationName`은 RMF Task 파라미터에서 직접 제공 (auto-fill 없음). `drop` action은 항상 `stationName` 포함.
+- **_build_pick_drop_order_update()**: 리셋 시 `_pick_drop_station_node = None`.
+
+### Station Node Removal 조건
+- `_pick_drop_destination is None` (dest 자체에 pickDrop이 있는 기존 시나리오와 충돌 방지)
+- `len(path) >= 2`
+- `path[-2]`의 nav_graph 속성에 `pickDrop: True`
+
+### Order 예시 (Station Node Removal)
+```
+경로: wp1-wp2-wp3(pickDrop)-wp4(station)-wp3-wp2-wp5(pickDrop)-wp6(station)
+
+Phase 1 (navigate to pick):
+  RMF: navigate(dest=wp4)
+  → station node wp4 제거, path=[wp1,wp2,wp3]
+  VDA5050: wp1(base)→wp2(base)→wp3(horizon)  [order_A, updateId=0]
+  → wp2 도착 → execution.finished()
+
+Phase 2 (pick action):
+  RMF: execute_action('pick', {})
+  VDA5050: wp2(base)→wp3(base,pick)  [order_A, updateId=1]
+  → order 리셋
+
+Phase 3 (navigate to drop):
+  RMF: navigate(dest=wp6)
+  → station node wp6 제거, path=[...,wp5]
+  VDA5050: wp3(base)→...→wp5(horizon)  [order_B, updateId=0]
+  → pre-staging 도착 → execution.finished()
+
+Phase 4 (drop action):
+  RMF: execute_action('drop', {})
+  → stationName은 RMF Task params에서 제공
+  VDA5050: ...→wp5(base,drop+stationName=wp6)  [order_B, updateId=1]
+  → order 리셋
+```
+
 ## Robot Connection 관리 (구현 완료)
 - VDA5050 connection topic을 구독하여 로봇별 연결 상태(`ConnectionState`)를 캐싱.
 - `is_robot_connected()`: navigate 등 명령 전송 전 pre-flight check. 미연결 시 `RETRY` 반환.
