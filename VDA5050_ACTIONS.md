@@ -191,14 +191,14 @@ Phase 1: navigate(dest=wp4, final=wp4)
   → wp2 거리 기반 도착 감지 → execution.finished()
 
 Phase 2: execute_action('pick', {loadType, loadID})
-  → stationName auto-fill: params = {stationName: 'wp4', ...}
+  → pick action에는 stationName 미포함
   → _build_pick_drop_order_update()
   → 경로: wp2 → wp3, 모든 노드 base
-  → wp3에 pick nodeAction(HARD, stationName=wp4) 부착
+  → wp3에 pick nodeAction(HARD) 부착
   ┌──────────────────────────────────────────────┐
   │ Order Update (orderID=A, updateId=1)         │
   │   wp2(base, seq=0) → wp3(base, seq=2,       │
-  │     actions=[pick{HARD, stationName=wp4}])   │
+  │     actions=[pick{HARD}])                    │
   └──────────────────────────────────────────────┘
   → Order 라이프사이클 리셋
 
@@ -227,7 +227,7 @@ Task 완료 → _reset_order_state()
 핵심 구현 사항:
 - path[-2]가 pickDrop이면 path[-1](station node)을 경로에서 제거 (charging 패턴 동일)
 - `_pick_drop_station_node`에 제거된 station node 이름 저장
-- `execute_action()`에서 `stationName`이 params에 없으면 자동으로 `_pick_drop_station_node` 값 채움
+- `execute_action()`에서 `stationName`이 params에 없고 `pick`이 아닌 action이면 자동으로 `_pick_drop_station_node` 값 채움
 - dest 자체에 pickDrop이 있는 기존 시나리오와 충돌하지 않음 (`_pick_drop_destination is None` 체크)
 
 ### Charging Actions

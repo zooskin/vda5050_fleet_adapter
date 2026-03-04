@@ -870,6 +870,7 @@ class RobotAdapter:
         if (
             self._pick_drop_station_node is not None
             and 'stationName' not in params
+            and category != 'pick'
         ):
             params['stationName'] = self._pick_drop_station_node
 

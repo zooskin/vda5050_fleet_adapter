@@ -3575,7 +3575,32 @@ class TestPickDropStationRemoval:
     def test_station_name_autofill(
         self, station_adapter, mock_api
     ):
-        """execute_action('pick', {}) → params에 stationName=wp4."""
+        """execute_action('drop', {}) → params에 stationName=wp4."""
+        dest = MagicMock()
+        dest.name = 'wp4'
+        dest.final_name = 'wp4'
+        dest.position = [10.0, 5.0, 0.0]
+        dest.map = 'map1'
+        station_adapter.navigate(dest, MagicMock())
+        station_adapter.cancel_cmd_attempt()
+        mock_api.navigate.reset_mock()
+
+        station_adapter.position = [5.0, 0.0, 0.0]  # at wp2
+        station_adapter.execute_action('drop', {}, MagicMock())
+        station_adapter.cancel_cmd_attempt()
+
+        nodes = mock_api.navigate.call_args[0][2]
+        last_node = nodes[-1]
+        action = last_node.actions[0]
+        param_dict = {
+            p.key: p.value for p in action.action_parameters
+        }
+        assert param_dict.get('stationName') == 'wp4'
+
+    def test_pick_no_station_name(
+        self, station_adapter, mock_api
+    ):
+        """execute_action('pick', {}) → stationName 미포함."""
         dest = MagicMock()
         dest.name = 'wp4'
         dest.final_name = 'wp4'
@@ -3595,7 +3620,7 @@ class TestPickDropStationRemoval:
         param_dict = {
             p.key: p.value for p in action.action_parameters
         }
-        assert param_dict.get('stationName') == 'wp4'
+        assert 'stationName' not in param_dict
 
     def test_station_name_no_override(
         self, station_adapter, mock_api
@@ -3694,14 +3719,14 @@ class TestPickDropStationRemoval:
         station_adapter.execute_action('pick', {}, MagicMock())
         station_adapter.cancel_cmd_attempt()
 
-        # stationName auto-filled
+        # pick action에는 stationName 미포함
         nav_call = mock_api.navigate.call_args[0]
         action_nodes = nav_call[2]
         action = action_nodes[-1].actions[0]
         param_dict = {
             p.key: p.value for p in action.action_parameters
         }
-        assert param_dict.get('stationName') == 'wp4'
+        assert 'stationName' not in param_dict
 
         # order 리셋
         assert station_adapter._active_order_id is None
