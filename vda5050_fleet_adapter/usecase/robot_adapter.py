@@ -315,11 +315,116 @@ class RobotAdapter:
         self._navigate_target_position = list(destination.position[:2])
         self._is_navigating = True
 
-        # 충전 태스크 감지: nav_graph 속성 is_charger로 판단
         dest_name_raw = getattr(destination, 'name', '')
+        self._detect_dest_attributes(dest_name_raw)
+
+        self.node.get_logger().info(
+            f'[{self.name}] navigate callback called, '
+            f'dest={destination.position}, map={destination.map}, '
+            f'name={dest_name_raw}'
+        )
+
+        goal_node = self._resolve_goal_node(destination)
+        if goal_node is None:
+            logger.error(
+                'No nearest node found for robot [%s] at %s',
+                self.name, destination.position,
+            )
+            return
+
+        is_negotiation, cancel_cmd_id = (
+            self._resolve_order_lifecycle(destination, goal_node)
+        )
+
+        start_node = self._find_start_node(goal_node)
+        target = self._final_destination or goal_node
+
+        path, target = self._build_navigate_path(
+            destination, start_node, target,
+        )
+
+        # pickDrop: 로봇이 이미 destination에 있는 경우 조기 리턴
+        if (
+            self._pick_drop_destination is not None
+            and len(path) == 1
+            and path[0] == self._pick_drop_destination
+        ):
+            self._active_order_id = None
+            self._is_navigating = False
+            self.execution.finished()
+            self.execution = None
+            logger.info(
+                'Robot %s already at pickDrop destination %s, '
+                'completing immediately',
+                self.name, self._pick_drop_destination,
+            )
+            return
+
+        path, base_end_index = self._apply_path_modifiers(
+            path, goal_node, target,
+        )
+
+        # ── VDA5050 Node/Edge 생성 ──
+        seq_start = (
+            self._last_stitch_seq_id
+            if self._order_update_id > 0
+            else 0
+        )
+
+        map_name = destination.map
+        self._last_map = map_name
+        vda_nodes, vda_edges = build_vda5050_nodes_edges(
+            path, self.nav_nodes, map_name,
+            base_end_index=base_end_index,
+            seq_start=seq_start,
+            edges=self.nav_edges,
+            turn_angle_threshold=self.turn_angle_threshold,
+            allowed_deviation_theta=self.allowed_deviation_theta,
+        )
+
+        # Base 도착 노드의 theta를 도착 판정에 사용
+        base_node_pos = vda_nodes[base_end_index].node_position
+        self._navigate_target_theta = (
+            base_node_pos.theta if base_node_pos else None
+        )
+
+        self._attach_charging_actions(vda_nodes, base_end_index)
+
+        # 다음 order update를 위해 stitching sequenceId 저장
+        self._last_stitch_seq_id = seq_start + base_end_index * 2
+
+        # 경로 캐시 업데이트
+        self._last_nodes = [
+            [n, (self.nav_nodes[n]['x'], self.nav_nodes[n]['y'])]
+            for n in path
+        ]
+
+        logger.info(
+            'Navigate [%s]: cmd_id=%d, order_id=%s, '
+            'order_update_id=%d, dest=%s, final_dest=%s, '
+            'map=%s, path=%s, base_end_index=%d',
+            self.name, self.cmd_id, self._active_order_id,
+            self._order_update_id, destination.position,
+            self._final_destination, map_name, path,
+            base_end_index,
+        )
+
+        self._send_navigate_order(
+            vda_nodes, vda_edges, map_name,
+            is_negotiation, cancel_cmd_id,
+        )
+
+    def _detect_dest_attributes(self, dest_name_raw: str) -> None:
+        """Destination 노드의 charging/pickDrop 속성을 감지한다.
+
+        Args:
+            dest_name_raw: destination의 원시 이름.
+        """
         dest_node_attrs = self.nav_nodes.get(
             dest_name_raw, {}
         ).get('attributes', {})
+
+        # 충전 태스크 감지: nav_graph 속성 is_charger로 판단
         dest_is_charger = dest_node_attrs.get('is_charger', False)
         if dest_is_charger and dest_name_raw:
             self._is_charging_pending = True
@@ -335,33 +440,40 @@ class RobotAdapter:
         else:
             self._pick_drop_destination = None
 
-        self.node.get_logger().info(
-            f'[{self.name}] navigate callback called, '
-            f'dest={destination.position}, map={destination.map}, '
-            f'name={getattr(destination, "name", "")}'
-        )
+    def _resolve_goal_node(self, destination: Any) -> str | None:
+        """Destination에서 goal_node를 결정한다.
 
-        # Use destination.name for exact waypoint match (if available)
+        Args:
+            destination: RMF destination 객체.
+
+        Returns:
+            goal_node 이름 또는 None.
+        """
         dest_name = getattr(destination, 'name', '')
         if dest_name and dest_name in self.nav_nodes:
-            goal_node = dest_name
-        else:
-            goal_node = find_nearest_node(
-                self.nav_nodes,
-                destination.position[0],
-                destination.position[1],
-            )
+            return dest_name
+        return find_nearest_node(
+            self.nav_nodes,
+            destination.position[0],
+            destination.position[1],
+        )
 
-        if goal_node is None:
-            logger.error(
-                'No nearest node found for robot [%s] at %s',
-                self.name, destination.position,
-            )
-            return
+    def _resolve_order_lifecycle(
+        self, destination: Any, goal_node: str,
+    ) -> tuple[bool, int | None]:
+        """Negotiation/task 경계를 감지하고 order ID를 관리한다.
 
-        # Negotiation 처리: pause 상태에서 navigate가 호출되면
-        # cancelOrder 전송 → AGV 처리 대기 → 새 orderID로 명령
+        Args:
+            destination: RMF destination 객체.
+            goal_node: 목적지 노드 이름.
+
+        Returns:
+            (is_negotiation, cancel_cmd_id) 튜플.
+            cancel_cmd_id는 negotiation 시에만 유효.
+        """
         is_negotiation = self._is_paused_for_negotiation
+        cancel_cmd_id = None
+
         if is_negotiation:
             self._is_paused_for_negotiation = False
             cancel_cmd_id = self.cmd_id
@@ -414,18 +526,46 @@ class RobotAdapter:
                     )
                 )
 
-        # 현재 위치 기반으로 start_node 결정
+        return is_negotiation, cancel_cmd_id
+
+    def _find_start_node(self, goal_node: str) -> str:
+        """현재 위치 기반으로 start_node를 결정한다.
+
+        Args:
+            goal_node: fallback으로 사용할 목적지 노드.
+
+        Returns:
+            start_node 이름.
+        """
         start_node = None
         if self.position is not None:
             start_node = find_nearest_node(
                 self.nav_nodes, self.position[0], self.position[1]
             )
-
         if start_node is None:
             start_node = goal_node
+        return start_node
 
-        # ── Step 1: destination에서 경로 추출 ──
-        target = self._final_destination or goal_node
+    def _build_navigate_path(
+        self,
+        destination: Any,
+        start_node: str,
+        target: str,
+    ) -> tuple[list[str], str]:
+        """경로를 계산한다.
+
+        Waypoint 추출, interpolation, bridge path, station node
+        removal을 수행한다.
+
+        Args:
+            destination: RMF destination 객체.
+            start_node: 출발 노드.
+            target: 최종 목적지 노드.
+
+        Returns:
+            (path, target) 튜플. target은 station node removal 시
+            수정될 수 있다.
+        """
         raw_waypoints = getattr(destination, 'waypoint_names', None)
         rmf_path = None
         if raw_waypoints and isinstance(
@@ -497,27 +637,25 @@ class RobotAdapter:
                     pre_dest,
                 )
 
-        # pickDrop: 로봇이 이미 destination에 있는 경우 조기 리턴
-        if (
-            self._pick_drop_destination is not None
-            and len(path) == 1
-            and path[0] == self._pick_drop_destination
-        ):
-            self._active_order_id = None
-            self._is_navigating = False
-            self.execution.finished()
-            self.execution = None
-            logger.info(
-                'Robot %s already at pickDrop destination %s, '
-                'completing immediately',
-                self.name, self._pick_drop_destination,
-            )
-            return
+        return path, target
 
-        # ── Step 2: 3-tier 경로 구성 (경로 조립 관점) ──
-        # tier 1 (Horizon - RMF 경로):      path[0 : rmf_path_end+1]
-        # tier 2 (Horizon - 최종목적지 확장): path[rmf_path_end+1 :]
-        # tier 3 (Base):                    path[0 : base_end_index+1]
+    def _apply_path_modifiers(
+        self,
+        path: list[str],
+        goal_node: str,
+        target: str,
+    ) -> tuple[list[str], int]:
+        """3-tier 구성, pickDrop base 조정, charger 노드 제거를 적용한다.
+
+        Args:
+            path: 노드 경로.
+            goal_node: RMF destination 노드.
+            target: 최종 목적지 노드.
+
+        Returns:
+            (path, base_end_index) 튜플.
+        """
+        # ── 3-tier 경로 구성 (경로 조립 관점) ──
         rmf_path_end = len(path) - 1
 
         # Tier 2 확장: path에 최종목적지가 없으면
@@ -575,8 +713,6 @@ class RobotAdapter:
             )
 
         # ── Charging: charger 노드를 경로에서 항상 제거 ──
-        # _final_destination이 is_charger 속성 노드이면,
-        # 경로 끝의 charger 노드를 제거한다 (모든 navigate 호출에서).
         _final_is_charger = (
             self._final_destination is not None
             and self.nav_nodes.get(
@@ -616,113 +752,99 @@ class RobotAdapter:
             path[:base_end_index + 1],
         )
 
-        # ── Step 3: VDA5050 Node/Edge 생성 ──
-        # Order update 시 stitching node의 sequenceId를 유지한다.
-        seq_start = (
-            self._last_stitch_seq_id
-            if self._order_update_id > 0
-            else 0
-        )
+        return path, base_end_index
 
-        map_name = destination.map
-        self._last_map = map_name
-        vda_nodes, vda_edges = build_vda5050_nodes_edges(
-            path, self.nav_nodes, map_name,
-            base_end_index=base_end_index,
-            seq_start=seq_start,
-            edges=self.nav_edges,
-            turn_angle_threshold=self.turn_angle_threshold,
-            allowed_deviation_theta=self.allowed_deviation_theta,
-        )
+    def _attach_charging_actions(
+        self, vda_nodes: list, base_end_index: int,
+    ) -> None:
+        """VDA5050 노드에 startCharging/stopCharging action을 부착한다.
 
-        # Base 도착 노드의 theta를 도착 판정에 사용
-        base_node_pos = vda_nodes[base_end_index].node_position
-        self._navigate_target_theta = (
-            base_node_pos.theta if base_node_pos else None
-        )
-
-        # ── Charging nodeAction 부착 ──
-        if vda_nodes and (
+        Args:
+            vda_nodes: VDA5050 노드 리스트.
+            base_end_index: Base 영역의 마지막 인덱스.
+        """
+        if not vda_nodes or not (
             self._is_charging_pending or self._was_charging
         ):
-            from vda5050_fleet_adapter.domain.entities.action import (
-                Action, ActionParameter,
-            )
-            from vda5050_fleet_adapter.domain.enums import BlockingType
+            return
 
-            # stopCharging: 이전 충전 상태 → 첫 번째 노드에 부착
-            if self._was_charging:
-                stop_action = Action(
-                    action_type='stopCharging',
-                    action_id=(
-                        f'stopCharging_{self.cmd_id}'
-                        f'_{uuid.uuid4().hex[:8]}'
-                    ),
-                    blocking_type=BlockingType.HARD,
-                    action_parameters=[],
-                )
-                vda_nodes[0].actions.append(stop_action)
-                logger.info(
-                    'Attached stopCharging to node[0] for '
-                    'robot %s (action_id=%s)',
-                    self.name, stop_action.action_id,
-                )
-                self._was_charging = False
-                self._is_charging_decommissioned = False
-
-            # startCharging: 마지막 base 노드에 부착
-            if self._is_charging_pending:
-                charge_action = Action(
-                    action_type='startCharging',
-                    action_id=(
-                        f'startCharging_{self.cmd_id}'
-                        f'_{uuid.uuid4().hex[:8]}'
-                    ),
-                    blocking_type=BlockingType.HARD,
-                    action_parameters=[
-                        ActionParameter(
-                            key='stationName',
-                            value=self._charging_station_name,
-                        ),
-                    ],
-                )
-                last_base_idx = min(
-                    base_end_index, len(vda_nodes) - 1,
-                )
-                vda_nodes[last_base_idx].actions.append(
-                    charge_action
-                )
-                self._charging_action_id = (
-                    charge_action.action_id
-                )
-                logger.info(
-                    'Attached startCharging to node[%d] for '
-                    'robot %s (station=%s, action_id=%s)',
-                    last_base_idx, self.name,
-                    self._charging_station_name,
-                    charge_action.action_id,
-                )
-
-        # 다음 order update를 위해 stitching sequenceId 저장
-        # stitching node = 현재 Base의 마지막 노드
-        self._last_stitch_seq_id = seq_start + base_end_index * 2
-
-        # 경로 캐시 업데이트
-        self._last_nodes = [
-            [n, (self.nav_nodes[n]['x'], self.nav_nodes[n]['y'])]
-            for n in path
-        ]
-
-        logger.info(
-            'Navigate [%s]: cmd_id=%d, order_id=%s, '
-            'order_update_id=%d, dest=%s, final_dest=%s, '
-            'map=%s, path=%s, base_end_index=%d',
-            self.name, self.cmd_id, self._active_order_id,
-            self._order_update_id, destination.position,
-            self._final_destination, map_name, path,
-            base_end_index,
+        from vda5050_fleet_adapter.domain.entities.action import (
+            Action, ActionParameter,
         )
+        from vda5050_fleet_adapter.domain.enums import BlockingType
 
+        # stopCharging: 이전 충전 상태 → 첫 번째 노드에 부착
+        if self._was_charging:
+            stop_action = Action(
+                action_type='stopCharging',
+                action_id=(
+                    f'stopCharging_{self.cmd_id}'
+                    f'_{uuid.uuid4().hex[:8]}'
+                ),
+                blocking_type=BlockingType.HARD,
+                action_parameters=[],
+            )
+            vda_nodes[0].actions.append(stop_action)
+            logger.info(
+                'Attached stopCharging to node[0] for '
+                'robot %s (action_id=%s)',
+                self.name, stop_action.action_id,
+            )
+            self._was_charging = False
+            self._is_charging_decommissioned = False
+
+        # startCharging: 마지막 base 노드에 부착
+        if self._is_charging_pending:
+            charge_action = Action(
+                action_type='startCharging',
+                action_id=(
+                    f'startCharging_{self.cmd_id}'
+                    f'_{uuid.uuid4().hex[:8]}'
+                ),
+                blocking_type=BlockingType.HARD,
+                action_parameters=[
+                    ActionParameter(
+                        key='stationName',
+                        value=self._charging_station_name,
+                    ),
+                ],
+            )
+            last_base_idx = min(
+                base_end_index, len(vda_nodes) - 1,
+            )
+            vda_nodes[last_base_idx].actions.append(
+                charge_action
+            )
+            self._charging_action_id = (
+                charge_action.action_id
+            )
+            logger.info(
+                'Attached startCharging to node[%d] for '
+                'robot %s (station=%s, action_id=%s)',
+                last_base_idx, self.name,
+                self._charging_station_name,
+                charge_action.action_id,
+            )
+
+    def _send_navigate_order(
+        self,
+        vda_nodes: list,
+        vda_edges: list,
+        map_name: str,
+        is_negotiation: bool,
+        cancel_cmd_id: int | None,
+    ) -> None:
+        """VDA5050 navigate order를 전송한다.
+
+        Negotiation 시 cancelOrder를 먼저 전송한 후 새 order를 전송한다.
+
+        Args:
+            vda_nodes: VDA5050 노드 리스트.
+            vda_edges: VDA5050 엣지 리스트.
+            map_name: 맵 이름.
+            is_negotiation: negotiation 여부.
+            cancel_cmd_id: negotiation 시 cancel 명령 ID.
+        """
         nav_args = (
             self.name,
             self.cmd_id,
