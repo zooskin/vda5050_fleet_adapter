@@ -7,6 +7,7 @@ RobotAPI를 통해 VDA5050 AGV에 명령을 전달한다.
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 import logging
 import math
 import threading
@@ -27,6 +28,48 @@ from vda5050_fleet_adapter.usecase.ports.robot_api import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class ChargingState:
+    """충전 관련 상태."""
+
+    is_pending: bool = False
+    is_active: bool = False
+    station_name: str | None = None
+    action_id: str | None = None
+    was_charging: bool = False
+    is_decommissioned: bool = False
+
+
+@dataclass
+class OrderState:
+    """Order 라이프사이클 상태."""
+
+    active_order_id: str | None = None
+    order_update_id: int = 0
+    final_destination: str | None = None
+    current_task_id: str | None = None
+    last_stitch_seq_id: int = 0
+    last_map: str | None = None
+    last_nodes: list = field(default_factory=list)
+
+
+@dataclass
+class NavigationState:
+    """Navigate 도착 판정 상태."""
+
+    target_position: list[float] | None = None
+    target_theta: float | None = None
+    is_navigating: bool = False
+
+
+@dataclass
+class PickDropState:
+    """pickDrop 상태."""
+
+    destination: str | None = None
+    station_node: str | None = None
 
 
 class RobotAdapter:
@@ -78,16 +121,11 @@ class RobotAdapter:
         self.cmd_id: int = 0
         self.position: list[float] | None = None
 
-        # Navigate 도착 판정 상태
-        self._navigate_target_position: list[float] | None = None
-        self._navigate_target_theta: float | None = None
-        self._is_navigating: bool = False
-
-        # Order 라이프사이클 관리
-        self._active_order_id: str | None = None
-        self._order_update_id: int = 0
-        self._final_destination: str | None = None
-        self._current_task_id: str | None = None
+        # 상태 그룹
+        self._charging = ChargingState()
+        self._order = OrderState()
+        self._nav = NavigationState()
+        self._pick_drop = PickDropState()
 
         # 명령 재시도 스레드 관리
         self._issue_cmd_thread: threading.Thread | None = None
@@ -96,25 +134,8 @@ class RobotAdapter:
         # Negotiation 상태 관리
         self._is_paused_for_negotiation: bool = False
 
-        # 충전 상태 관리
-        self._is_charging_pending: bool = False   # charger로 이동 중
-        self._is_charging: bool = False           # startCharging 완료 대기
-        self._charging_station_name: str | None = None
-        self._charging_action_id: str | None = None
-        self._was_charging: bool = False          # 다음 order에 stopCharging 필요
-        self._is_charging_decommissioned: bool = False  # 충전 중 decommission
-
-        # 경로 캐시
-        self._last_nodes: list[list] = []
-        self._last_stitch_seq_id: int = 0  # 마지막 Base 노드의 sequenceId
-        self._last_map: str | None = None  # 마지막 navigate의 맵 이름
-
         # Commission 상태 추적
         self._last_commission: Any | None = None
-
-        # pickDrop 상태 관리
-        self._pick_drop_destination: str | None = None
-        self._pick_drop_station_node: str | None = None
 
     def update(self, state: Any, data: RobotUpdateData) -> None:
         """주기적 상태 업데이트.
@@ -130,76 +151,27 @@ class RobotAdapter:
         activity_identifier = None
 
         if self.execution is not None:
-            completed = False
-            if self._is_charging:
-                # startCharging action 완료 대기
-                # (AGV 도킹+충전 시작 완료 시 FINISHED)
-                completed = self.api.is_command_completed(
-                    self.name, self.cmd_id
-                )
-                if completed:
-                    self._was_charging = True
-                    self._is_charging_decommissioned = True
-            elif self._is_navigating and self._navigate_target_position:
-                dist = math.hypot(
-                    data.position[0]
-                    - self._navigate_target_position[0],
-                    data.position[1]
-                    - self._navigate_target_position[1],
-                )
-                if dist <= self.arrival_threshold:
-                    theta_ok = True
-                    if self._navigate_target_theta is not None:
-                        angle_diff = abs(_normalize_angle(
-                            data.position[2]
-                            - self._navigate_target_theta
-                        ))
-                        theta_ok = (
-                            angle_diff
-                            <= self.allowed_deviation_theta
-                        )
-                    if not theta_ok:
-                        pass  # 회전 미완료, 도착 보류
-                    elif self._is_charging_pending:
-                        # Pre-charger 도착 → Phase 2 전환
-                        self._is_navigating = False
-                        self._is_charging_pending = False
-                        self._is_charging = True
-                        logger.info(
-                            'Pre-charger arrival for robot %s, '
-                            'transitioning to charging mode '
-                            '(station=%s)',
-                            self.name,
-                            self._charging_station_name,
-                        )
-                    else:
-                        completed = True
-            else:
-                completed = self.api.is_command_completed(
-                    self.name, self.cmd_id
-                )
+            completed = self._check_completion(data)
             if completed:
                 self.execution.finished()
                 self.execution = None
-                self._is_navigating = False
-                self._is_charging = False
-                self._is_charging_pending = False
-                self._charging_station_name = None
-                self._charging_action_id = None
-                self._navigate_target_position = None
-                self._navigate_target_theta = None
-            elif not self._is_charging:
+                self._nav = NavigationState()
+                self._charging.is_active = False
+                self._charging.is_pending = False
+                self._charging.station_name = None
+                self._charging.action_id = None
+            elif not self._charging.is_active:
                 activity_identifier = self.execution.identifier
 
         # Task 완료 감지: task_id가 변경되거나 비어있으면 order 리셋
-        if self._active_order_id is not None and self.execution is None:
+        if self._order.active_order_id is not None and self.execution is None:
             current_task_id = self._get_current_task_id()
             task_ended = (
                 current_task_id is None
                 or current_task_id == ''
                 or (
-                    self._current_task_id is not None
-                    and current_task_id != self._current_task_id
+                    self._order.current_task_id is not None
+                    and current_task_id != self._order.current_task_id
                 )
             )
             if task_ended:
@@ -209,6 +181,59 @@ class RobotAdapter:
             self.update_handle.update(state, activity_identifier)
             self._update_commission()
             self._apply_charging_decommission(data.battery_soc)
+
+    def _check_completion(self, data: RobotUpdateData) -> bool:
+        """명령 완료를 감지한다.
+
+        Args:
+            data: 로봇 상태 데이터.
+
+        Returns:
+            True이면 완료, False이면 미완료.
+        """
+        if self._charging.is_active:
+            completed = self.api.is_command_completed(
+                self.name, self.cmd_id
+            )
+            if completed:
+                self._charging.was_charging = True
+                self._charging.is_decommissioned = True
+            return completed
+
+        if self._nav.is_navigating and self._nav.target_position:
+            dist = math.hypot(
+                data.position[0] - self._nav.target_position[0],
+                data.position[1] - self._nav.target_position[1],
+            )
+            if dist <= self.arrival_threshold:
+                theta_ok = True
+                if self._nav.target_theta is not None:
+                    angle_diff = abs(_normalize_angle(
+                        data.position[2]
+                        - self._nav.target_theta
+                    ))
+                    theta_ok = (
+                        angle_diff
+                        <= self.allowed_deviation_theta
+                    )
+                if not theta_ok:
+                    return False
+                if self._charging.is_pending:
+                    self._nav.is_navigating = False
+                    self._charging.is_pending = False
+                    self._charging.is_active = True
+                    logger.info(
+                        'Pre-charger arrival for robot %s, '
+                        'transitioning to charging mode '
+                        '(station=%s)',
+                        self.name,
+                        self._charging.station_name,
+                    )
+                    return False
+                return True
+            return False
+
+        return self.api.is_command_completed(self.name, self.cmd_id)
 
     def _update_commission(self) -> None:
         """VDA5050 상태 기반으로 RMF commission을 업데이트한다."""
@@ -252,11 +277,11 @@ class RobotAdapter:
         Args:
             battery_soc: 현재 배터리 SOC (0.0~1.0).
         """
-        if not self._is_charging_decommissioned:
+        if not self._charging.is_decommissioned:
             return
 
         if battery_soc >= self.recharge_soc:
-            self._is_charging_decommissioned = False
+            self._charging.is_decommissioned = False
             self._last_commission = None
             logger.info(
                 'Charging recommission [%s]: SOC %.2f >= %.2f',
@@ -312,8 +337,8 @@ class RobotAdapter:
         """
         self.cmd_id += 1
         self.execution = execution
-        self._navigate_target_position = list(destination.position[:2])
-        self._is_navigating = True
+        self._nav.target_position = list(destination.position[:2])
+        self._nav.is_navigating = True
 
         dest_name_raw = getattr(destination, 'name', '')
         self._detect_dest_attributes(dest_name_raw)
@@ -337,7 +362,7 @@ class RobotAdapter:
         )
 
         start_node = self._find_start_node(goal_node)
-        target = self._final_destination or goal_node
+        target = self._order.final_destination or goal_node
 
         path, target = self._build_navigate_path(
             destination, start_node, target,
@@ -345,18 +370,18 @@ class RobotAdapter:
 
         # pickDrop: 로봇이 이미 destination에 있는 경우 조기 리턴
         if (
-            self._pick_drop_destination is not None
+            self._pick_drop.destination is not None
             and len(path) == 1
-            and path[0] == self._pick_drop_destination
+            and path[0] == self._pick_drop.destination
         ):
-            self._active_order_id = None
-            self._is_navigating = False
+            self._order.active_order_id = None
+            self._nav.is_navigating = False
             self.execution.finished()
             self.execution = None
             logger.info(
                 'Robot %s already at pickDrop destination %s, '
                 'completing immediately',
-                self.name, self._pick_drop_destination,
+                self.name, self._pick_drop.destination,
             )
             return
 
@@ -366,13 +391,13 @@ class RobotAdapter:
 
         # ── VDA5050 Node/Edge 생성 ──
         seq_start = (
-            self._last_stitch_seq_id
-            if self._order_update_id > 0
+            self._order.last_stitch_seq_id
+            if self._order.order_update_id > 0
             else 0
         )
 
         map_name = destination.map
-        self._last_map = map_name
+        self._order.last_map = map_name
         vda_nodes, vda_edges = build_vda5050_nodes_edges(
             path, self.nav_nodes, map_name,
             base_end_index=base_end_index,
@@ -384,17 +409,17 @@ class RobotAdapter:
 
         # Base 도착 노드의 theta를 도착 판정에 사용
         base_node_pos = vda_nodes[base_end_index].node_position
-        self._navigate_target_theta = (
+        self._nav.target_theta = (
             base_node_pos.theta if base_node_pos else None
         )
 
         self._attach_charging_actions(vda_nodes, base_end_index)
 
         # 다음 order update를 위해 stitching sequenceId 저장
-        self._last_stitch_seq_id = seq_start + base_end_index * 2
+        self._order.last_stitch_seq_id = seq_start + base_end_index * 2
 
         # 경로 캐시 업데이트
-        self._last_nodes = [
+        self._order.last_nodes = [
             [n, (self.nav_nodes[n]['x'], self.nav_nodes[n]['y'])]
             for n in path
         ]
@@ -403,9 +428,9 @@ class RobotAdapter:
             'Navigate [%s]: cmd_id=%d, order_id=%s, '
             'order_update_id=%d, dest=%s, final_dest=%s, '
             'map=%s, path=%s, base_end_index=%d',
-            self.name, self.cmd_id, self._active_order_id,
-            self._order_update_id, destination.position,
-            self._final_destination, map_name, path,
+            self.name, self.cmd_id, self._order.active_order_id,
+            self._order.order_update_id, destination.position,
+            self._order.final_destination, map_name, path,
             base_end_index,
         )
 
@@ -427,18 +452,18 @@ class RobotAdapter:
         # 충전 태스크 감지: nav_graph 속성 is_charger로 판단
         dest_is_charger = dest_node_attrs.get('is_charger', False)
         if dest_is_charger and dest_name_raw:
-            self._is_charging_pending = True
-            self._charging_station_name = dest_name_raw
+            self._charging.is_pending = True
+            self._charging.station_name = dest_name_raw
         else:
-            self._is_charging_pending = False
-            self._charging_station_name = None
+            self._charging.is_pending = False
+            self._charging.station_name = None
 
         # pickDrop 감지: nav_graph 속성 pickDrop으로 판단
         dest_is_pick_drop = dest_node_attrs.get('pickDrop', False)
         if dest_is_pick_drop and dest_name_raw:
-            self._pick_drop_destination = dest_name_raw
+            self._pick_drop.destination = dest_name_raw
         else:
-            self._pick_drop_destination = None
+            self._pick_drop.destination = None
 
     def _resolve_goal_node(self, destination: Any) -> str | None:
         """Destination에서 goal_node를 결정한다.
@@ -484,45 +509,45 @@ class RobotAdapter:
                 self.name, cancel_cmd_id,
             )
             current_task_id = self._get_current_task_id()
-            self._current_task_id = current_task_id
-            self._final_destination = (
+            self._order.current_task_id = current_task_id
+            self._order.final_destination = (
                 self._resolve_final_destination(destination, goal_node)
             )
-            self._active_order_id = (
+            self._order.active_order_id = (
                 f'order_{self.cmd_id}_{uuid.uuid4().hex[:8]}'
             )
-            self._order_update_id = 0
-            self._last_nodes = []
+            self._order.order_update_id = 0
+            self._order.last_nodes = []
         else:
             # Task 경계 감지: current_task_id 변경 시 새 Task
             current_task_id = self._get_current_task_id()
             is_new_task = (
-                self._active_order_id is None
+                self._order.active_order_id is None
                 or (
                     current_task_id
-                    and current_task_id != self._current_task_id
+                    and current_task_id != self._order.current_task_id
                 )
             )
 
             if is_new_task:
-                self._current_task_id = current_task_id
-                self._final_destination = (
+                self._order.current_task_id = current_task_id
+                self._order.final_destination = (
                     self._resolve_final_destination(
                         destination, goal_node
                     )
                 )
-                self._active_order_id = (
+                self._order.active_order_id = (
                     f'order_{self.cmd_id}_{uuid.uuid4().hex[:8]}'
                 )
-                self._order_update_id = 0
-                self._last_nodes = []
+                self._order.order_update_id = 0
+                self._order.last_nodes = []
             else:
                 # Order Update: 같은 orderID, update_id 증가
-                self._order_update_id += 1
-                self._final_destination = (
+                self._order.order_update_id += 1
+                self._order.final_destination = (
                     self._resolve_final_destination(
                         destination,
-                        self._final_destination or goal_node,
+                        self._order.final_destination or goal_node,
                     )
                 )
 
@@ -617,7 +642,7 @@ class RobotAdapter:
         # Station node removal: path[-2]가 pickDrop이면
         # station(path[-1])을 경로에서 제거 (charging 패턴 동일)
         if (
-            self._pick_drop_destination is None
+            self._pick_drop.destination is None
             and len(path) >= 2
         ):
             pre_dest = path[-2]
@@ -625,15 +650,15 @@ class RobotAdapter:
                 pre_dest, {}
             ).get('attributes', {})
             if pre_dest_attrs.get('pickDrop', False):
-                self._pick_drop_station_node = path[-1]
-                self._pick_drop_destination = pre_dest
+                self._pick_drop.station_node = path[-1]
+                self._pick_drop.destination = pre_dest
                 path = path[:-1]
                 target = pre_dest
-                self._final_destination = pre_dest
+                self._order.final_destination = pre_dest
                 logger.info(
                     'Station node removal for %s: removed %s, '
                     'pickDrop staging=%s',
-                    self.name, self._pick_drop_station_node,
+                    self.name, self._pick_drop.station_node,
                     pre_dest,
                 )
 
@@ -693,13 +718,13 @@ class RobotAdapter:
 
         # ── pickDrop: dest를 horizon으로 유지, 직전 노드까지 base ──
         if (
-            self._pick_drop_destination is not None
+            self._pick_drop.destination is not None
             and len(path) >= 2
             and base_end_index >= 1
         ):
             base_end_index -= 1
             pre_pick_drop = path[base_end_index]
-            self._navigate_target_position = [
+            self._nav.target_position = [
                 self.nav_nodes[pre_pick_drop]['x'],
                 self.nav_nodes[pre_pick_drop]['y'],
             ]
@@ -708,29 +733,29 @@ class RobotAdapter:
                 'pre_dest=%s, pick_drop_dest=%s, '
                 'base_end_index=%d',
                 self.name, pre_pick_drop,
-                self._pick_drop_destination,
+                self._pick_drop.destination,
                 base_end_index,
             )
 
         # ── Charging: charger 노드를 경로에서 항상 제거 ──
         _final_is_charger = (
-            self._final_destination is not None
+            self._order.final_destination is not None
             and self.nav_nodes.get(
-                self._final_destination, {}
+                self._order.final_destination, {}
             ).get('attributes', {}).get('is_charger', False)
         )
         if (
             _final_is_charger
             and len(path) >= 2
-            and path[-1] == self._final_destination
+            and path[-1] == self._order.final_destination
         ):
             path = path[:-1]
             if rmf_path_end >= len(path):
                 rmf_path_end = len(path) - 1
-            if self._is_charging_pending:
+            if self._charging.is_pending:
                 # dest가 charger: pre-charger 도착 타겟, 전체 base
                 pre_charger = path[-1]
-                self._navigate_target_position = [
+                self._nav.target_position = [
                     self.nav_nodes[pre_charger]['x'],
                     self.nav_nodes[pre_charger]['y'],
                 ]
@@ -739,7 +764,7 @@ class RobotAdapter:
                 'Charging: removed charger node for robot %s, '
                 'pre_charger=%s, station=%s, path=%s',
                 self.name, path[-1],
-                self._final_destination, path,
+                self._order.final_destination, path,
             )
 
         logger.info(
@@ -764,7 +789,7 @@ class RobotAdapter:
             base_end_index: Base 영역의 마지막 인덱스.
         """
         if not vda_nodes or not (
-            self._is_charging_pending or self._was_charging
+            self._charging.is_pending or self._charging.was_charging
         ):
             return
 
@@ -774,7 +799,7 @@ class RobotAdapter:
         from vda5050_fleet_adapter.domain.enums import BlockingType
 
         # stopCharging: 이전 충전 상태 → 첫 번째 노드에 부착
-        if self._was_charging:
+        if self._charging.was_charging:
             stop_action = Action(
                 action_type='stopCharging',
                 action_id=(
@@ -790,11 +815,11 @@ class RobotAdapter:
                 'robot %s (action_id=%s)',
                 self.name, stop_action.action_id,
             )
-            self._was_charging = False
-            self._is_charging_decommissioned = False
+            self._charging.was_charging = False
+            self._charging.is_decommissioned = False
 
         # startCharging: 마지막 base 노드에 부착
-        if self._is_charging_pending:
+        if self._charging.is_pending:
             charge_action = Action(
                 action_type='startCharging',
                 action_id=(
@@ -805,7 +830,7 @@ class RobotAdapter:
                 action_parameters=[
                     ActionParameter(
                         key='stationName',
-                        value=self._charging_station_name,
+                        value=self._charging.station_name,
                     ),
                 ],
             )
@@ -815,14 +840,14 @@ class RobotAdapter:
             vda_nodes[last_base_idx].actions.append(
                 charge_action
             )
-            self._charging_action_id = (
+            self._charging.action_id = (
                 charge_action.action_id
             )
             logger.info(
                 'Attached startCharging to node[%d] for '
                 'robot %s (station=%s, action_id=%s)',
                 last_base_idx, self.name,
-                self._charging_station_name,
+                self._charging.station_name,
                 charge_action.action_id,
             )
 
@@ -851,14 +876,14 @@ class RobotAdapter:
             vda_nodes,
             vda_edges,
             map_name,
-            self._active_order_id,
-            self._order_update_id,
+            self._order.active_order_id,
+            self._order.order_update_id,
         )
 
         # 충전 navigate: startCharging action 완료를 추적
         track_id = (
-            self._charging_action_id
-            if self._is_charging_pending
+            self._charging.action_id
+            if self._charging.is_pending
             else None
         )
 
@@ -917,15 +942,15 @@ class RobotAdapter:
         if self.execution is not None:
             if self.execution.identifier.is_same(activity):
                 # 충전 중이면 다음 order에 stopCharging 부착 예약
-                if self._is_charging:
-                    self._was_charging = True
-                    self._is_charging_decommissioned = False
-                    self._is_charging = False
-                    self._is_charging_pending = False
-                    self._charging_station_name = None
-                    self._charging_action_id = None
+                if self._charging.is_active:
+                    self._charging.was_charging = True
+                    self._charging.is_decommissioned = False
+                    self._charging.is_active = False
+                    self._charging.is_pending = False
+                    self._charging.station_name = None
+                    self._charging.action_id = None
                 self.execution = None
-                self._navigate_target_theta = None
+                self._nav.target_theta = None
                 self._is_paused_for_negotiation = True
                 self.cancel_cmd_attempt()
                 self.cmd_id += 1
@@ -951,19 +976,19 @@ class RobotAdapter:
         """
         self.cmd_id += 1
         self.execution = execution
-        self._is_navigating = False
+        self._nav.is_navigating = False
 
         logger.info(
             'Execute action [%s]: category=%s, cmd_id=%d, '
             'active_order=%s',
             self.name, category, self.cmd_id,
-            self._active_order_id,
+            self._order.active_order_id,
         )
 
         params = description if isinstance(description, dict) else {}
 
         if (
-            self._active_order_id is not None
+            self._order.active_order_id is not None
             and self.position is not None
         ):
             self._execute_action_as_order_update(category, params)
@@ -1017,9 +1042,9 @@ class RobotAdapter:
             action_parameters=action_params,
         )
 
-        self._order_update_id += 1
+        self._order.order_update_id += 1
 
-        if self._pick_drop_destination is not None:
+        if self._pick_drop.destination is not None:
             self._build_pick_drop_order_update(
                 current_node, action, action_id, category,
             )
@@ -1046,18 +1071,18 @@ class RobotAdapter:
         # 경로 구성: 현재 노드 (Base) + 최종 목적지까지 Horizon
         path = [current_node]
         if (
-            self._final_destination
-            and self._final_destination != current_node
+            self._order.final_destination
+            and self._order.final_destination != current_node
         ):
             extension = compute_path(
                 self.nav_graph, current_node,
-                self._final_destination,
+                self._order.final_destination,
             )
             if extension and len(extension) > 1:
                 path = path + extension[1:]
 
-        map_name = self._last_map or 'map1'
-        seq_start = self._last_stitch_seq_id
+        map_name = self._order.last_map or 'map1'
+        seq_start = self._order.last_stitch_seq_id
 
         vda_nodes, vda_edges = build_vda5050_nodes_edges(
             path, self.nav_nodes, map_name,
@@ -1070,14 +1095,14 @@ class RobotAdapter:
         vda_nodes[0].actions.append(action)
 
         # Stitch seq 유지 (base_end_index=0 → seq_start + 0)
-        self._last_stitch_seq_id = seq_start
+        self._order.last_stitch_seq_id = seq_start
 
         logger.info(
             'Action as order update [%s]: category=%s, '
             'action_id=%s, order_id=%s, update_id=%d, '
             'node=%s, path=%s',
             self.name, category, action_id,
-            self._active_order_id, self._order_update_id,
+            self._order.active_order_id, self._order.order_update_id,
             current_node, path,
         )
 
@@ -1087,8 +1112,8 @@ class RobotAdapter:
             vda_nodes,
             vda_edges,
             map_name,
-            self._active_order_id,
-            self._order_update_id,
+            self._order.active_order_id,
+            self._order.order_update_id,
         )
 
         self.attempt_cmd_until_success(
@@ -1116,7 +1141,7 @@ class RobotAdapter:
             action_id: action 추적용 ID.
             category: 액션 종류.
         """
-        pick_drop_dest = self._pick_drop_destination
+        pick_drop_dest = self._pick_drop.destination
 
         # 경로: 현재 노드 → pickDrop destination
         if current_node == pick_drop_dest:
@@ -1130,8 +1155,8 @@ class RobotAdapter:
             else:
                 path = [current_node, pick_drop_dest]
 
-        map_name = self._last_map or 'map1'
-        seq_start = self._last_stitch_seq_id
+        map_name = self._order.last_map or 'map1'
+        seq_start = self._order.last_stitch_seq_id
         base_end_index = len(path) - 1  # 모든 노드 base
 
         vda_nodes, vda_edges = build_vda5050_nodes_edges(
@@ -1145,8 +1170,8 @@ class RobotAdapter:
         vda_nodes[-1].actions.append(action)
 
         # nav_args에 order_id를 미리 캡처 (리셋 전)
-        order_id = self._active_order_id
-        update_id = self._order_update_id
+        order_id = self._order.active_order_id
+        update_id = self._order.order_update_id
 
         logger.info(
             'pickDrop action order update [%s]: category=%s, '
@@ -1175,11 +1200,11 @@ class RobotAdapter:
         )
 
         # Order 라이프사이클 리셋: 다음 navigate가 새 orderID 생성
-        self._active_order_id = None
-        self._order_update_id = 0
-        self._last_stitch_seq_id = 0
-        self._pick_drop_destination = None
-        self._pick_drop_station_node = None
+        self._order.active_order_id = None
+        self._order.order_update_id = 0
+        self._order.last_stitch_seq_id = 0
+        self._pick_drop.destination = None
+        self._pick_drop.station_node = None
 
     def attempt_cmd_until_success(
         self, cmd: Any, args: tuple
@@ -1285,9 +1310,9 @@ class RobotAdapter:
                 args=(self.name, self.cmd_id),
             )
 
-        if self._pick_drop_destination is not None:
-            self._pick_drop_destination = None
-            self._pick_drop_station_node = None
+        if self._pick_drop.destination is not None:
+            self._pick_drop.destination = None
+            self._pick_drop.station_node = None
             self.cmd_id += 1
             logger.info(
                 'Task ended with pickDrop pending, sending '
@@ -1299,24 +1324,16 @@ class RobotAdapter:
                 args=(self.name, self.cmd_id),
             )
 
-        self._navigate_target_position = None
-        self._navigate_target_theta = None
-        self._is_navigating = False
-        self._is_charging = False
-        self._is_charging_pending = False
-        self._charging_station_name = None
-        self._charging_action_id = None
-        self._pick_drop_station_node = None
-        # _was_charging은 보존: 다음 order에서 stopCharging 전송 필요
+        self._nav = NavigationState()
+        self._charging.is_active = False
+        self._charging.is_pending = False
+        self._charging.station_name = None
+        self._charging.action_id = None
+        self._pick_drop.station_node = None
+        # was_charging, is_decommissioned은 보존
 
-        old_task_id = self._current_task_id
-        self._active_order_id = None
-        self._order_update_id = 0
-        self._final_destination = None
-        self._current_task_id = None
-        self._last_nodes = []
-        self._last_stitch_seq_id = 0
-        self._last_map = None
+        old_task_id = self._order.current_task_id
+        self._order = OrderState()
         logger.info(
             'Order state reset for robot %s (task_id=%s)',
             self.name, old_task_id,

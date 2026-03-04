@@ -108,14 +108,14 @@ class TestRobotAdapterNavigate:
         dest.map = 'map1'
         execution = MagicMock()
 
-        assert adapter._active_order_id is None
+        assert adapter._order.active_order_id is None
         adapter.navigate(dest, execution)
         adapter.cancel_cmd_attempt()
 
-        assert adapter._active_order_id is not None
-        assert adapter._active_order_id.startswith('order_')
-        assert adapter._order_update_id == 0
-        assert adapter._final_destination is not None
+        assert adapter._order.active_order_id is not None
+        assert adapter._order.active_order_id.startswith('order_')
+        assert adapter._order.order_update_id == 0
+        assert adapter._order.final_destination is not None
 
     def test_navigate_updates_existing_order(self, adapter):
         """두 번째 navigate 시 같은 orderID, update_id 증가."""
@@ -127,8 +127,8 @@ class TestRobotAdapterNavigate:
         adapter.navigate(dest1, exec1)
         adapter.cancel_cmd_attempt()
 
-        first_order_id = adapter._active_order_id
-        first_final_dest = adapter._final_destination
+        first_order_id = adapter._order.active_order_id
+        first_final_dest = adapter._order.final_destination
 
         dest2 = MagicMock()
         dest2.position = [0.0, 0.0, 0.0]
@@ -138,9 +138,9 @@ class TestRobotAdapterNavigate:
         adapter.navigate(dest2, exec2)
         adapter.cancel_cmd_attempt()
 
-        assert adapter._active_order_id == first_order_id
-        assert adapter._order_update_id == 1
-        assert adapter._final_destination == first_final_dest
+        assert adapter._order.active_order_id == first_order_id
+        assert adapter._order.order_update_id == 1
+        assert adapter._order.final_destination == first_final_dest
 
     def test_navigate_passes_order_id_to_api(self, adapter, mock_api):
         """navigate가 order_id와 order_update_id를 API에 전달한다."""
@@ -218,16 +218,16 @@ class TestRobotAdapterStop:
         activity = MagicMock()
         execution.identifier.is_same.return_value = True
         adapter.execution = execution
-        adapter._active_order_id = 'order_1_abc'
-        adapter._order_update_id = 2
-        adapter._final_destination = 'wp3'
+        adapter._order.active_order_id = 'order_1_abc'
+        adapter._order.order_update_id = 2
+        adapter._order.final_destination = 'wp3'
 
         adapter.stop(activity)
         adapter.cancel_cmd_attempt()
 
-        assert adapter._active_order_id == 'order_1_abc'
-        assert adapter._order_update_id == 2
-        assert adapter._final_destination == 'wp3'
+        assert adapter._order.active_order_id == 'order_1_abc'
+        assert adapter._order.order_update_id == 2
+        assert adapter._order.final_destination == 'wp3'
 
     def test_stop_ignores_different_activity(self, adapter, mock_api):
         """다른 activity에 대한 stop은 무시된다."""
@@ -291,8 +291,8 @@ class TestRobotAdapterUpdate:
         adapter.execution = execution
         adapter.cmd_id = 5
         adapter.update_handle = MagicMock()
-        adapter._is_navigating = True
-        adapter._navigate_target_position = [1.0, 2.0]
+        adapter._nav.is_navigating = True
+        adapter._nav.target_position = [1.0, 2.0]
 
         state = MagicMock()
         data = RobotUpdateData(
@@ -306,8 +306,8 @@ class TestRobotAdapterUpdate:
 
         execution.finished.assert_called_once()
         assert adapter.execution is None
-        assert adapter._is_navigating is False
-        assert adapter._navigate_target_position is None
+        assert adapter._nav.is_navigating is False
+        assert adapter._nav.target_position is None
 
     def test_completion_preserves_order_during_task(
         self, adapter, mock_api
@@ -320,12 +320,12 @@ class TestRobotAdapterUpdate:
         mock_update_handle.more.return_value.current_task_id \
             .return_value = 'compose.dispatch-001'
         adapter.update_handle = mock_update_handle
-        adapter._active_order_id = 'order_5_abc'
-        adapter._order_update_id = 1
-        adapter._final_destination = 'wp3'
-        adapter._current_task_id = 'compose.dispatch-001'
-        adapter._is_navigating = True
-        adapter._navigate_target_position = [1.0, 2.0]
+        adapter._order.active_order_id = 'order_5_abc'
+        adapter._order.order_update_id = 1
+        adapter._order.final_destination = 'wp3'
+        adapter._order.current_task_id = 'compose.dispatch-001'
+        adapter._nav.is_navigating = True
+        adapter._nav.target_position = [1.0, 2.0]
 
         state = MagicMock()
         data = RobotUpdateData(
@@ -340,7 +340,7 @@ class TestRobotAdapterUpdate:
         execution.finished.assert_called_once()
         assert adapter.execution is None
         # Order state preserved (task still active)
-        assert adapter._active_order_id == 'order_5_abc'
+        assert adapter._order.active_order_id == 'order_5_abc'
 
     def test_completion_resets_order_when_task_ends(
         self, adapter, mock_api
@@ -354,12 +354,12 @@ class TestRobotAdapterUpdate:
         mock_update_handle.more.return_value.current_task_id \
             .return_value = ''
         adapter.update_handle = mock_update_handle
-        adapter._active_order_id = 'order_5_abc'
-        adapter._order_update_id = 1
-        adapter._final_destination = 'wp3'
-        adapter._current_task_id = 'compose.dispatch-001'
-        adapter._is_navigating = True
-        adapter._navigate_target_position = [1.0, 2.0]
+        adapter._order.active_order_id = 'order_5_abc'
+        adapter._order.order_update_id = 1
+        adapter._order.final_destination = 'wp3'
+        adapter._order.current_task_id = 'compose.dispatch-001'
+        adapter._nav.is_navigating = True
+        adapter._nav.target_position = [1.0, 2.0]
 
         state = MagicMock()
         data = RobotUpdateData(
@@ -371,9 +371,9 @@ class TestRobotAdapterUpdate:
 
         adapter.update(state, data)
 
-        assert adapter._active_order_id is None
-        assert adapter._order_update_id == 0
-        assert adapter._final_destination is None
+        assert adapter._order.active_order_id is None
+        assert adapter._order.order_update_id == 0
+        assert adapter._order.final_destination is None
 
     def test_update_keeps_execution_if_not_completed(
         self, adapter, mock_api
@@ -383,8 +383,8 @@ class TestRobotAdapterUpdate:
         adapter.execution = execution
         adapter.cmd_id = 5
         adapter.update_handle = MagicMock()
-        adapter._is_navigating = True
-        adapter._navigate_target_position = [10.0, 10.0]
+        adapter._nav.is_navigating = True
+        adapter._nav.target_position = [10.0, 10.0]
 
         state = MagicMock()
         data = RobotUpdateData(
@@ -515,8 +515,8 @@ class TestDistanceBasedArrival:
         execution = MagicMock()
         adapter.execution = execution
         adapter.update_handle = MagicMock()
-        adapter._is_navigating = True
-        adapter._navigate_target_position = [5.0, 5.0]
+        adapter._nav.is_navigating = True
+        adapter._nav.target_position = [5.0, 5.0]
         adapter.arrival_threshold = 0.5
 
         state = MagicMock()
@@ -538,8 +538,8 @@ class TestDistanceBasedArrival:
         execution = MagicMock()
         adapter.execution = execution
         adapter.update_handle = MagicMock()
-        adapter._is_navigating = True
-        adapter._navigate_target_position = [5.0, 5.0]
+        adapter._nav.is_navigating = True
+        adapter._nav.target_position = [5.0, 5.0]
         adapter.arrival_threshold = 0.5
 
         state = MagicMock()
@@ -561,8 +561,8 @@ class TestDistanceBasedArrival:
         execution = MagicMock()
         adapter.execution = execution
         adapter.update_handle = MagicMock()
-        adapter._is_navigating = True
-        adapter._navigate_target_position = [5.0, 0.0]
+        adapter._nav.is_navigating = True
+        adapter._nav.target_position = [5.0, 0.0]
         adapter.arrival_threshold = 0.5
 
         state = MagicMock()
@@ -585,7 +585,7 @@ class TestDistanceBasedArrival:
         adapter.execution = execution
         adapter.cmd_id = 5
         adapter.update_handle = MagicMock()
-        adapter._is_navigating = False
+        adapter._nav.is_navigating = False
         mock_api.is_command_completed.return_value = True
 
         state = MagicMock()
@@ -609,7 +609,7 @@ class TestDistanceBasedArrival:
         adapter.execution = execution
         adapter.cmd_id = 5
         adapter.update_handle = MagicMock()
-        adapter._is_navigating = False
+        adapter._nav.is_navigating = False
         mock_api.is_command_completed.return_value = False
 
         state = MagicMock()
@@ -634,19 +634,19 @@ class TestDistanceBasedArrival:
         adapter.navigate(dest, execution)
         adapter.cancel_cmd_attempt()
 
-        assert adapter._navigate_target_position == [5.0, 3.0]
-        assert adapter._is_navigating is True
+        assert adapter._nav.target_position == [5.0, 3.0]
+        assert adapter._nav.is_navigating is True
 
     def test_execute_action_clears_navigating(self, adapter):
         """execute_action() 호출 시 _is_navigating이 False가 된다."""
-        adapter._is_navigating = True
-        adapter._navigate_target_position = [5.0, 3.0]
+        adapter._nav.is_navigating = True
+        adapter._nav.target_position = [5.0, 3.0]
         execution = MagicMock()
 
         adapter.execute_action('charge', {}, execution)
         adapter.cancel_cmd_attempt()
 
-        assert adapter._is_navigating is False
+        assert adapter._nav.is_navigating is False
 
     def test_custom_arrival_threshold(
         self, mock_api, mock_node,
@@ -669,8 +669,8 @@ class TestDistanceBasedArrival:
 
         execution = MagicMock()
         robot.execution = execution
-        robot._is_navigating = True
-        robot._navigate_target_position = [5.0, 0.0]
+        robot._nav.is_navigating = True
+        robot._nav.target_position = [5.0, 0.0]
 
         state = MagicMock()
         # dist = 0.8, within 1.0 threshold
@@ -685,13 +685,13 @@ class TestDistanceBasedArrival:
 
     def test_reset_order_clears_navigate_state(self, adapter):
         """_reset_order_state가 navigate 상태를 초기화한다."""
-        adapter._is_navigating = True
-        adapter._navigate_target_position = [5.0, 3.0]
+        adapter._nav.is_navigating = True
+        adapter._nav.target_position = [5.0, 3.0]
 
         adapter._reset_order_state()
 
-        assert adapter._is_navigating is False
-        assert adapter._navigate_target_position is None
+        assert adapter._nav.is_navigating is False
+        assert adapter._nav.target_position is None
 
 
 class TestThetaBasedArrival:
@@ -703,9 +703,9 @@ class TestThetaBasedArrival:
         execution = MagicMock()
         adapter.execution = execution
         adapter.update_handle = MagicMock()
-        adapter._is_navigating = True
-        adapter._navigate_target_position = [5.0, 0.0]
-        adapter._navigate_target_theta = math.pi / 2
+        adapter._nav.is_navigating = True
+        adapter._nav.target_position = [5.0, 0.0]
+        adapter._nav.target_theta = math.pi / 2
         adapter.allowed_deviation_theta = math.radians(15)
         adapter.arrival_threshold = 0.5
 
@@ -727,9 +727,9 @@ class TestThetaBasedArrival:
         execution = MagicMock()
         adapter.execution = execution
         adapter.update_handle = MagicMock()
-        adapter._is_navigating = True
-        adapter._navigate_target_position = [5.0, 0.0]
-        adapter._navigate_target_theta = math.pi / 2
+        adapter._nav.is_navigating = True
+        adapter._nav.target_position = [5.0, 0.0]
+        adapter._nav.target_theta = math.pi / 2
         adapter.allowed_deviation_theta = math.radians(15)
         adapter.arrival_threshold = 0.5
 
@@ -750,9 +750,9 @@ class TestThetaBasedArrival:
         execution = MagicMock()
         adapter.execution = execution
         adapter.update_handle = MagicMock()
-        adapter._is_navigating = True
-        adapter._navigate_target_position = [5.0, 0.0]
-        adapter._navigate_target_theta = None
+        adapter._nav.is_navigating = True
+        adapter._nav.target_position = [5.0, 0.0]
+        adapter._nav.target_theta = None
         adapter.arrival_threshold = 0.5
 
         state = MagicMock()
@@ -773,9 +773,9 @@ class TestThetaBasedArrival:
         execution = MagicMock()
         adapter.execution = execution
         adapter.update_handle = MagicMock()
-        adapter._is_navigating = True
-        adapter._navigate_target_position = [5.0, 0.0]
-        adapter._navigate_target_theta = math.pi / 2
+        adapter._nav.is_navigating = True
+        adapter._nav.target_position = [5.0, 0.0]
+        adapter._nav.target_theta = math.pi / 2
         adapter.allowed_deviation_theta = math.radians(15)
         adapter.arrival_threshold = 0.5
 
@@ -797,9 +797,9 @@ class TestThetaBasedArrival:
         execution = MagicMock()
         adapter.execution = execution
         adapter.update_handle = MagicMock()
-        adapter._is_navigating = True
-        adapter._navigate_target_position = [5.0, 0.0]
-        adapter._navigate_target_theta = math.pi / 2
+        adapter._nav.is_navigating = True
+        adapter._nav.target_position = [5.0, 0.0]
+        adapter._nav.target_theta = math.pi / 2
         adapter.allowed_deviation_theta = math.radians(15)
         adapter.arrival_threshold = 0.5
 
@@ -812,16 +812,16 @@ class TestThetaBasedArrival:
 
         adapter.update(state, data)
 
-        assert adapter._navigate_target_theta is None
+        assert adapter._nav.target_theta is None
 
     def test_theta_reset_on_order_reset(self, adapter):
         """_reset_order_state가 _navigate_target_theta를 리셋."""
         import math
-        adapter._navigate_target_theta = math.pi / 2
+        adapter._nav.target_theta = math.pi / 2
 
         adapter._reset_order_state()
 
-        assert adapter._navigate_target_theta is None
+        assert adapter._nav.target_theta is None
 
 
 class TestRobotAdapterRetry:
@@ -911,7 +911,7 @@ class TestFinalNameIntegration:
         adapter_with_handle.navigate(dest, execution)
         adapter_with_handle.cancel_cmd_attempt()
 
-        assert adapter_with_handle._final_destination == 'wp4'
+        assert adapter_with_handle._order.final_destination == 'wp4'
 
     def test_falls_back_without_final_name(
         self, adapter_with_handle, mock_api,
@@ -926,7 +926,7 @@ class TestFinalNameIntegration:
         adapter_with_handle.navigate(dest, execution)
         adapter_with_handle.cancel_cmd_attempt()
 
-        assert adapter_with_handle._final_destination == 'wp2'
+        assert adapter_with_handle._order.final_destination == 'wp2'
 
     def test_falls_back_when_final_name_empty(
         self, adapter_with_handle, mock_api,
@@ -943,7 +943,7 @@ class TestFinalNameIntegration:
         adapter_with_handle.navigate(dest, execution)
         adapter_with_handle.cancel_cmd_attempt()
 
-        assert adapter_with_handle._final_destination == 'wp2'
+        assert adapter_with_handle._order.final_destination == 'wp2'
 
 
 class TestOrderLifecycle:
@@ -962,7 +962,7 @@ class TestOrderLifecycle:
         adapter_with_handle.navigate(dest1, exec1)
         adapter_with_handle.cancel_cmd_attempt()
 
-        order_id = adapter_with_handle._active_order_id
+        order_id = adapter_with_handle._order.active_order_id
 
         # Navigate 완료 시뮬레이션: 거리 기반 도착
         state = MagicMock()
@@ -973,7 +973,7 @@ class TestOrderLifecycle:
         adapter_with_handle.update(state, data)
 
         # Order state 유지 (task 아직 active)
-        assert adapter_with_handle._active_order_id == order_id
+        assert adapter_with_handle._order.active_order_id == order_id
 
     def test_order_update_id_increments(
         self, adapter_with_handle, mock_api
@@ -988,8 +988,8 @@ class TestOrderLifecycle:
         adapter_with_handle.navigate(dest1, exec1)
         adapter_with_handle.cancel_cmd_attempt()
 
-        order_id = adapter_with_handle._active_order_id
-        assert adapter_with_handle._order_update_id == 0
+        order_id = adapter_with_handle._order.active_order_id
+        assert adapter_with_handle._order.order_update_id == 0
 
         dest2 = MagicMock()
         dest2.position = [5.0, 5.0, 0.0]
@@ -998,8 +998,8 @@ class TestOrderLifecycle:
         adapter_with_handle.navigate(dest2, exec2)
         adapter_with_handle.cancel_cmd_attempt()
 
-        assert adapter_with_handle._active_order_id == order_id
-        assert adapter_with_handle._order_update_id == 1
+        assert adapter_with_handle._order.active_order_id == order_id
+        assert adapter_with_handle._order.order_update_id == 1
 
     def test_stop_pauses_for_negotiation(
         self, adapter_with_handle,
@@ -1009,14 +1009,14 @@ class TestOrderLifecycle:
         activity = MagicMock()
         execution.identifier.is_same.return_value = True
         adapter_with_handle.execution = execution
-        adapter_with_handle._active_order_id = 'order_1_abc'
-        adapter_with_handle._current_task_id = 'compose.dispatch-001'
+        adapter_with_handle._order.active_order_id = 'order_1_abc'
+        adapter_with_handle._order.current_task_id = 'compose.dispatch-001'
 
         adapter_with_handle.stop(activity)
         adapter_with_handle.cancel_cmd_attempt()
 
         assert adapter_with_handle._is_paused_for_negotiation is True
-        assert adapter_with_handle._active_order_id == 'order_1_abc'
+        assert adapter_with_handle._order.active_order_id == 'order_1_abc'
 
 
 class TestDestinationName:
@@ -1038,7 +1038,7 @@ class TestDestinationName:
         adapter_with_handle.cancel_cmd_attempt()
 
         # goal_node should be wp3 (from name, not find_nearest_node)
-        assert adapter_with_handle._final_destination is not None
+        assert adapter_with_handle._order.final_destination is not None
 
     def test_falls_back_to_nearest_node(
         self, adapter_with_handle, mock_api
@@ -1054,7 +1054,7 @@ class TestDestinationName:
         adapter_with_handle.navigate(dest, execution)
         adapter_with_handle.cancel_cmd_attempt()
 
-        assert adapter_with_handle._final_destination is not None
+        assert adapter_with_handle._order.final_destination is not None
 
     def test_falls_back_when_name_not_in_nav_nodes(
         self, adapter_with_handle, mock_api
@@ -1072,7 +1072,7 @@ class TestDestinationName:
         adapter_with_handle.cancel_cmd_attempt()
 
         # Should use find_nearest_node fallback (wp2)
-        assert adapter_with_handle._final_destination is not None
+        assert adapter_with_handle._order.final_destination is not None
 
 
 class TestFinalNameReResolve:
@@ -1095,7 +1095,7 @@ class TestFinalNameReResolve:
         adapter_with_handle.cancel_cmd_attempt()
 
         # fallback used
-        assert adapter_with_handle._final_destination == 'wp2'
+        assert adapter_with_handle._order.final_destination == 'wp2'
 
         # Second navigate: final_name available
         dest2 = MagicMock()
@@ -1107,7 +1107,7 @@ class TestFinalNameReResolve:
         adapter_with_handle.navigate(dest2, exec2)
         adapter_with_handle.cancel_cmd_attempt()
 
-        assert adapter_with_handle._final_destination == 'wp4'
+        assert adapter_with_handle._order.final_destination == 'wp4'
 
     def test_keeps_destination_when_no_final_name(
         self, adapter_with_handle, mock_api
@@ -1124,7 +1124,7 @@ class TestFinalNameReResolve:
         adapter_with_handle.navigate(dest1, exec1)
         adapter_with_handle.cancel_cmd_attempt()
 
-        first_dest = adapter_with_handle._final_destination
+        first_dest = adapter_with_handle._order.final_destination
 
         # Second navigate, still no final_name
         dest2 = MagicMock()
@@ -1137,7 +1137,7 @@ class TestFinalNameReResolve:
         adapter_with_handle.cancel_cmd_attempt()
 
         # _final_destination keeps previous value (fallback)
-        assert adapter_with_handle._final_destination == first_dest
+        assert adapter_with_handle._order.final_destination == first_dest
 
 
 class TestNegotiation:
@@ -1165,7 +1165,7 @@ class TestNegotiation:
         adapter_with_handle.navigate(dest1, exec1)
         adapter_with_handle.cancel_cmd_attempt()
 
-        first_order_id = adapter_with_handle._active_order_id
+        first_order_id = adapter_with_handle._order.active_order_id
         assert first_order_id is not None
 
         # 2. stop() → startPause (직접 호출)
@@ -1192,8 +1192,8 @@ class TestNegotiation:
         # navigate도 호출됨 (첫 번째 + negotiation 후)
         assert mock_api.navigate.call_count == 2
         # 새 orderID
-        assert adapter_with_handle._active_order_id != first_order_id
-        assert adapter_with_handle._order_update_id == 0
+        assert adapter_with_handle._order.active_order_id != first_order_id
+        assert adapter_with_handle._order.order_update_id == 0
         assert adapter_with_handle._is_paused_for_negotiation is False
 
     def test_negotiation_creates_new_order_id(
@@ -1209,7 +1209,7 @@ class TestNegotiation:
         adapter_with_handle.navigate(dest1, exec1)
         adapter_with_handle.cancel_cmd_attempt()
 
-        old_id = adapter_with_handle._active_order_id
+        old_id = adapter_with_handle._order.active_order_id
 
         # stop → pause (직접 호출)
         activity = MagicMock()
@@ -1224,7 +1224,7 @@ class TestNegotiation:
         adapter_with_handle.navigate(dest2, exec2)
         self._wait_thread(adapter_with_handle)
 
-        new_id = adapter_with_handle._active_order_id
+        new_id = adapter_with_handle._order.active_order_id
         assert new_id is not None
         assert new_id != old_id
         assert new_id.startswith('order_')
@@ -1263,7 +1263,7 @@ class TestNegotiation:
         # cancelOrder가 _reset_order_state에서 호출됨
         mock_api.stop.assert_called_once()
         assert adapter_with_handle._is_paused_for_negotiation is False
-        assert adapter_with_handle._active_order_id is None
+        assert adapter_with_handle._order.active_order_id is None
 
     def test_negotiation_flow_sequence(
         self, adapter_with_handle, mock_api
@@ -1940,11 +1940,11 @@ class TestStitchingSequenceId:
         self, adapter_with_handle, mock_api
     ):
         """_reset_order_state가 _last_stitch_seq_id를 초기화한다."""
-        adapter_with_handle._last_stitch_seq_id = 42
+        adapter_with_handle._order.last_stitch_seq_id = 42
 
         adapter_with_handle._reset_order_state()
 
-        assert adapter_with_handle._last_stitch_seq_id == 0
+        assert adapter_with_handle._order.last_stitch_seq_id == 0
 
 
 class TestExecuteActionAsOrderUpdate:
@@ -1965,7 +1965,7 @@ class TestExecuteActionAsOrderUpdate:
         adapter_with_handle.navigate(dest, MagicMock())
         adapter_with_handle.cancel_cmd_attempt()
 
-        order_id = adapter_with_handle._active_order_id
+        order_id = adapter_with_handle._order.active_order_id
         assert order_id is not None
         mock_api.navigate.reset_mock()
 
@@ -1983,7 +1983,7 @@ class TestExecuteActionAsOrderUpdate:
     ):
         """Active order 없으면 기존 instantAction 방식 사용."""
         adapter_with_handle.position = [0.0, 0.0, 0.0]
-        assert adapter_with_handle._active_order_id is None
+        assert adapter_with_handle._order.active_order_id is None
 
         adapter_with_handle.execute_action(
             'charge', {}, MagicMock()
@@ -2007,7 +2007,7 @@ class TestExecuteActionAsOrderUpdate:
         adapter_with_handle.navigate(dest, MagicMock())
         adapter_with_handle.cancel_cmd_attempt()
 
-        order_id = adapter_with_handle._active_order_id
+        order_id = adapter_with_handle._order.active_order_id
         mock_api.navigate.reset_mock()
 
         adapter_with_handle.position = [5.0, 0.0, 0.0]
@@ -2032,14 +2032,14 @@ class TestExecuteActionAsOrderUpdate:
         adapter_with_handle.navigate(dest, MagicMock())
         adapter_with_handle.cancel_cmd_attempt()
 
-        assert adapter_with_handle._order_update_id == 0
+        assert adapter_with_handle._order.order_update_id == 0
         mock_api.navigate.reset_mock()
 
         adapter_with_handle.position = [5.0, 0.0, 0.0]
         adapter_with_handle.execute_action('pick', {}, MagicMock())
         adapter_with_handle.cancel_cmd_attempt()
 
-        assert adapter_with_handle._order_update_id == 1
+        assert adapter_with_handle._order.order_update_id == 1
         call_args = mock_api.navigate.call_args
         assert call_args[0][6] == 1  # order_update_id
 
@@ -2197,9 +2197,9 @@ class TestCartDeliveryFlow:
         adapter_with_handle.navigate(dest1, MagicMock())
         adapter_with_handle.cancel_cmd_attempt()
 
-        order_id = adapter_with_handle._active_order_id
+        order_id = adapter_with_handle._order.active_order_id
         assert order_id is not None
-        assert adapter_with_handle._order_update_id == 0
+        assert adapter_with_handle._order.order_update_id == 0
 
         # Phase 2: pick action at wp2
         adapter_with_handle.position = [5.0, 0.0, 0.0]
@@ -2209,8 +2209,8 @@ class TestCartDeliveryFlow:
         adapter_with_handle.cancel_cmd_attempt()
 
         # 같은 orderID, update_id 증가
-        assert adapter_with_handle._active_order_id == order_id
-        assert adapter_with_handle._order_update_id == 1
+        assert adapter_with_handle._order.active_order_id == order_id
+        assert adapter_with_handle._order.order_update_id == 1
 
         # Phase 3: navigate to wp3 (dropoff)
         dest2 = MagicMock()
@@ -2222,8 +2222,8 @@ class TestCartDeliveryFlow:
         adapter_with_handle.cancel_cmd_attempt()
 
         # 같은 orderID, update_id 증가
-        assert adapter_with_handle._active_order_id == order_id
-        assert adapter_with_handle._order_update_id == 2
+        assert adapter_with_handle._order.active_order_id == order_id
+        assert adapter_with_handle._order.order_update_id == 2
 
         # Phase 4: drop action at wp3
         adapter_with_handle.position = [5.0, 5.0, 0.0]
@@ -2232,8 +2232,8 @@ class TestCartDeliveryFlow:
         )
         adapter_with_handle.cancel_cmd_attempt()
 
-        assert adapter_with_handle._active_order_id == order_id
-        assert adapter_with_handle._order_update_id == 3
+        assert adapter_with_handle._order.active_order_id == order_id
+        assert adapter_with_handle._order.order_update_id == 3
 
         # 전체 api.navigate 호출: 4회
         # (nav1 + action1 + nav2 + action2)
@@ -2320,11 +2320,11 @@ class TestCartDeliveryFlow:
         self, adapter_with_handle
     ):
         """_reset_order_state가 _last_map을 초기화한다."""
-        adapter_with_handle._last_map = 'map1'
+        adapter_with_handle._order.last_map = 'map1'
 
         adapter_with_handle._reset_order_state()
 
-        assert adapter_with_handle._last_map is None
+        assert adapter_with_handle._order.last_map is None
 
 
 class TestCharging:
@@ -2398,8 +2398,8 @@ class TestCharging:
         charging_adapter.navigate(dest, MagicMock())
         charging_adapter.cancel_cmd_attempt()
 
-        assert charging_adapter._is_charging_pending is True
-        assert charging_adapter._charging_station_name == 'charger_1'
+        assert charging_adapter._charging.is_pending is True
+        assert charging_adapter._charging.station_name == 'charger_1'
 
     def test_navigate_to_non_charger_no_charging(
         self, charging_adapter, mock_api
@@ -2414,8 +2414,8 @@ class TestCharging:
         charging_adapter.navigate(dest, MagicMock())
         charging_adapter.cancel_cmd_attempt()
 
-        assert charging_adapter._is_charging_pending is False
-        assert charging_adapter._charging_station_name is None
+        assert charging_adapter._charging.is_pending is False
+        assert charging_adapter._charging.station_name is None
 
     def test_charging_order_excludes_charger_node(
         self, charging_adapter, mock_api
@@ -2497,7 +2497,7 @@ class TestCharging:
 
         # pre-charger 노드(wp3)에 도착 시뮬레이션
         state = MagicMock()
-        target = charging_adapter._navigate_target_position
+        target = charging_adapter._nav.target_position
         data = RobotUpdateData(
             robot_name='AGV-001', map_name='map1',
             position=[target[0], target[1], 0.0],
@@ -2507,9 +2507,9 @@ class TestCharging:
         charging_adapter.update(state, data)
 
         execution.finished.assert_not_called()
-        assert charging_adapter._is_charging is True
-        assert charging_adapter._is_charging_pending is False
-        assert charging_adapter._is_navigating is False
+        assert charging_adapter._charging.is_active is True
+        assert charging_adapter._charging.is_pending is False
+        assert charging_adapter._nav.is_navigating is False
         assert charging_adapter.execution is execution
 
     def test_charging_completes_when_action_finished(
@@ -2528,14 +2528,14 @@ class TestCharging:
 
         # Phase 1: pre-charger 도착
         state = MagicMock()
-        target = charging_adapter._navigate_target_position
+        target = charging_adapter._nav.target_position
         data = RobotUpdateData(
             robot_name='AGV-001', map_name='map1',
             position=[target[0], target[1], 0.0],
             battery_soc=0.50,
         )
         charging_adapter.update(state, data)
-        assert charging_adapter._is_charging is True
+        assert charging_adapter._charging.is_active is True
 
         # Phase 2: AGV가 startCharging action FINISHED 보고
         mock_api.is_command_completed.return_value = True
@@ -2543,8 +2543,8 @@ class TestCharging:
 
         execution.finished.assert_called_once()
         assert charging_adapter.execution is None
-        assert charging_adapter._is_charging is False
-        assert charging_adapter._was_charging is True
+        assert charging_adapter._charging.is_active is False
+        assert charging_adapter._charging.was_charging is True
 
     def test_charging_not_complete_while_action_running(
         self, charging_adapter, mock_api
@@ -2562,7 +2562,7 @@ class TestCharging:
 
         # pre-charger 도착
         state = MagicMock()
-        target = charging_adapter._navigate_target_position
+        target = charging_adapter._nav.target_position
         data = RobotUpdateData(
             robot_name='AGV-001', map_name='map1',
             position=[target[0], target[1], 0.0],
@@ -2575,8 +2575,8 @@ class TestCharging:
         charging_adapter.update(state, data)
 
         execution.finished.assert_not_called()
-        assert charging_adapter._is_charging is True
-        assert charging_adapter._was_charging is False
+        assert charging_adapter._charging.is_active is True
+        assert charging_adapter._charging.was_charging is False
 
     def test_stop_during_charging_sets_was_charging(
         self, charging_adapter, mock_api
@@ -2594,14 +2594,14 @@ class TestCharging:
 
         # pre-charger 도착
         state = MagicMock()
-        target = charging_adapter._navigate_target_position
+        target = charging_adapter._nav.target_position
         data = RobotUpdateData(
             robot_name='AGV-001', map_name='map1',
             position=[target[0], target[1], 0.0],
             battery_soc=0.50,
         )
         charging_adapter.update(state, data)
-        assert charging_adapter._is_charging is True
+        assert charging_adapter._charging.is_active is True
 
         # negotiation → stop
         activity = MagicMock()
@@ -2612,28 +2612,28 @@ class TestCharging:
         # stopCharging은 즉시 전송하지 않음
         mock_api.start_activity.assert_not_called()
         # 대신 _was_charging 플래그 설정
-        assert charging_adapter._was_charging is True
-        assert charging_adapter._is_charging is False
-        assert charging_adapter._is_charging_pending is False
+        assert charging_adapter._charging.was_charging is True
+        assert charging_adapter._charging.is_active is False
+        assert charging_adapter._charging.is_pending is False
 
     def test_reset_order_clears_charging_state_but_preserves_was(
         self, charging_adapter
     ):
         """_reset_order_state가 충전 상태를 초기화하되 _was_charging은 보존."""
-        charging_adapter._is_charging = True
-        charging_adapter._is_charging_pending = True
-        charging_adapter._charging_station_name = 'charger_1'
-        charging_adapter._charging_action_id = 'some_id'
-        charging_adapter._was_charging = True
+        charging_adapter._charging.is_active = True
+        charging_adapter._charging.is_pending = True
+        charging_adapter._charging.station_name = 'charger_1'
+        charging_adapter._charging.action_id = 'some_id'
+        charging_adapter._charging.was_charging = True
 
         charging_adapter._reset_order_state()
 
-        assert charging_adapter._is_charging is False
-        assert charging_adapter._is_charging_pending is False
-        assert charging_adapter._charging_station_name is None
-        assert charging_adapter._charging_action_id is None
+        assert charging_adapter._charging.is_active is False
+        assert charging_adapter._charging.is_pending is False
+        assert charging_adapter._charging.station_name is None
+        assert charging_adapter._charging.action_id is None
         # _was_charging은 보존됨
-        assert charging_adapter._was_charging is True
+        assert charging_adapter._charging.was_charging is True
 
     def test_next_navigate_after_charging_has_stop_charging(
         self, charging_adapter, mock_api
@@ -2652,7 +2652,7 @@ class TestCharging:
 
         # pre-charger 도착 + startCharging FINISHED
         state = MagicMock()
-        target = charging_adapter._navigate_target_position
+        target = charging_adapter._nav.target_position
         data = RobotUpdateData(
             robot_name='AGV-001', map_name='map1',
             position=[target[0], target[1], 0.0],
@@ -2661,11 +2661,11 @@ class TestCharging:
         charging_adapter.update(state, data)
         mock_api.is_command_completed.return_value = True
         charging_adapter.update(state, data)
-        assert charging_adapter._was_charging is True
+        assert charging_adapter._charging.was_charging is True
 
         # task 종료 시뮬레이션
         charging_adapter._reset_order_state()
-        assert charging_adapter._was_charging is True
+        assert charging_adapter._charging.was_charging is True
 
         # 2. 새로운 navigate (go_to_place)
         charging_adapter.position = [5.0, 5.0, 0.0]
@@ -2695,15 +2695,15 @@ class TestCharging:
             if a.action_type == 'stopCharging'
         ]
         assert len(stop_actions) == 1
-        assert charging_adapter._was_charging is False
+        assert charging_adapter._charging.was_charging is False
 
     def test_was_charging_persists_through_reset(
         self, charging_adapter
     ):
         """_was_charging은 _reset_order_state 이후에도 유지된다."""
-        charging_adapter._was_charging = True
+        charging_adapter._charging.was_charging = True
         charging_adapter._reset_order_state()
-        assert charging_adapter._was_charging is True
+        assert charging_adapter._charging.was_charging is True
 
     def test_charging_navigate_uses_track_action_id(
         self, charging_adapter, mock_api
@@ -2739,9 +2739,9 @@ class TestCharging:
         charging_adapter.navigate(dest, execution)
         charging_adapter.cancel_cmd_attempt()
 
-        assert charging_adapter._is_charging_pending is True
-        assert charging_adapter._is_navigating is True
-        assert charging_adapter._is_charging is False
+        assert charging_adapter._charging.is_pending is True
+        assert charging_adapter._nav.is_navigating is True
+        assert charging_adapter._charging.is_active is False
 
         # order에 charger 노드 미포함 확인
         nodes = mock_api.navigate.call_args[0][2]
@@ -2757,15 +2757,15 @@ class TestCharging:
 
         # 2. 이동 중 (도착 전)
         state = MagicMock()
-        target = charging_adapter._navigate_target_position
+        target = charging_adapter._nav.target_position
         data_moving = RobotUpdateData(
             robot_name='AGV-001', map_name='map1',
             position=[2.0, 0.0, 0.0],  # 멀리 있음
             battery_soc=0.30,
         )
         charging_adapter.update(state, data_moving)
-        assert charging_adapter._is_navigating is True
-        assert charging_adapter._is_charging is False
+        assert charging_adapter._nav.is_navigating is True
+        assert charging_adapter._charging.is_active is False
         execution.finished.assert_not_called()
 
         # 3. pre-charger 노드 도착
@@ -2775,8 +2775,8 @@ class TestCharging:
             battery_soc=0.40,
         )
         charging_adapter.update(state, data_arrived)
-        assert charging_adapter._is_charging is True
-        assert charging_adapter._is_navigating is False
+        assert charging_adapter._charging.is_active is True
+        assert charging_adapter._nav.is_navigating is False
         execution.finished.assert_not_called()
 
         # 4. 충전 중 (action 미완료)
@@ -2787,7 +2787,7 @@ class TestCharging:
             battery_soc=0.70,
         )
         charging_adapter.update(state, data_charging)
-        assert charging_adapter._is_charging is True
+        assert charging_adapter._charging.is_active is True
         execution.finished.assert_not_called()
 
         # 5. startCharging action FINISHED → 충전 task 완료
@@ -2796,12 +2796,12 @@ class TestCharging:
 
         execution.finished.assert_called_once()
         assert charging_adapter.execution is None
-        assert charging_adapter._is_charging is False
-        assert charging_adapter._was_charging is True
+        assert charging_adapter._charging.is_active is False
+        assert charging_adapter._charging.was_charging is True
 
         # 6. task 종료 → order reset
         charging_adapter._reset_order_state()
-        assert charging_adapter._was_charging is True
+        assert charging_adapter._charging.was_charging is True
 
         # 7. 다음 order에서 stopCharging nodeAction 부착
         mock_api.navigate.reset_mock()
@@ -2827,7 +2827,7 @@ class TestCharging:
             if a.action_type == 'stopCharging'
         ]
         assert len(stop_actions) == 1
-        assert charging_adapter._was_charging is False
+        assert charging_adapter._charging.was_charging is False
 
     def test_intermediate_navigate_excludes_charger(
         self, charging_adapter, mock_api
@@ -2963,7 +2963,7 @@ class TestChargingDecommission:
 
         # pre-charger 도착
         state = MagicMock()
-        target = adapter._navigate_target_position
+        target = adapter._nav.target_position
         data = RobotUpdateData(
             robot_name='AGV-001', map_name='map1',
             position=[target[0], target[1], 0.0],
@@ -2983,8 +2983,8 @@ class TestChargingDecommission:
         """Charging 완료 시 decommission 플래그가 설정된다."""
         self._complete_charging(charging_adapter, mock_api)
 
-        assert charging_adapter._is_charging_decommissioned is True
-        assert charging_adapter._was_charging is True
+        assert charging_adapter._charging.is_decommissioned is True
+        assert charging_adapter._charging.was_charging is True
 
     def test_stays_decommissioned_while_soc_low(
         self, charging_adapter, mock_api
@@ -3002,7 +3002,7 @@ class TestChargingDecommission:
         mock_api.is_command_completed.return_value = False
         charging_adapter.update(state, data)
 
-        assert charging_adapter._is_charging_decommissioned is True
+        assert charging_adapter._charging.is_decommissioned is True
 
         more_handle = (
             charging_adapter.update_handle.more.return_value
@@ -3028,7 +3028,7 @@ class TestChargingDecommission:
         mock_api.is_command_completed.return_value = False
         charging_adapter.update(state, data)
 
-        assert charging_adapter._is_charging_decommissioned is False
+        assert charging_adapter._charging.is_decommissioned is False
         assert charging_adapter._last_commission is None
 
     def test_recommission_above_threshold(
@@ -3046,7 +3046,7 @@ class TestChargingDecommission:
         mock_api.is_command_completed.return_value = False
         charging_adapter.update(state, data)
 
-        assert charging_adapter._is_charging_decommissioned is False
+        assert charging_adapter._charging.is_decommissioned is False
         assert charging_adapter._last_commission is None
 
     def test_stop_during_charging_clears_decommission(
@@ -3065,14 +3065,14 @@ class TestChargingDecommission:
 
         # pre-charger 도착 → _is_charging = True
         state = MagicMock()
-        target = charging_adapter._navigate_target_position
+        target = charging_adapter._nav.target_position
         data = RobotUpdateData(
             robot_name='AGV-001', map_name='map1',
             position=[target[0], target[1], 0.0],
             battery_soc=0.30,
         )
         charging_adapter.update(state, data)
-        assert charging_adapter._is_charging is True
+        assert charging_adapter._charging.is_active is True
 
         # negotiation stop
         activity = MagicMock()
@@ -3080,19 +3080,19 @@ class TestChargingDecommission:
         charging_adapter.stop(activity)
         charging_adapter.cancel_cmd_attempt()
 
-        assert charging_adapter._is_charging_decommissioned is False
-        assert charging_adapter._was_charging is True
+        assert charging_adapter._charging.is_decommissioned is False
+        assert charging_adapter._charging.was_charging is True
 
     def test_navigate_with_stop_charging_clears_flag(
         self, charging_adapter, mock_api
     ):
         """Navigate에서 stopCharging 부착 시 decommission 해제."""
         self._complete_charging(charging_adapter, mock_api)
-        assert charging_adapter._is_charging_decommissioned is True
+        assert charging_adapter._charging.is_decommissioned is True
 
         # task 종료 → order reset
         charging_adapter._reset_order_state()
-        assert charging_adapter._is_charging_decommissioned is True
+        assert charging_adapter._charging.is_decommissioned is True
 
         # 새 navigate → stopCharging 부착
         charging_adapter.position = [5.0, 5.0, 0.0]
@@ -3112,8 +3112,8 @@ class TestChargingDecommission:
         charging_adapter.navigate(dest2, MagicMock())
         charging_adapter.cancel_cmd_attempt()
 
-        assert charging_adapter._is_charging_decommissioned is False
-        assert charging_adapter._was_charging is False
+        assert charging_adapter._charging.is_decommissioned is False
+        assert charging_adapter._charging.was_charging is False
 
     def test_no_decommission_when_not_charging(
         self, charging_adapter, mock_api
@@ -3131,7 +3131,7 @@ class TestChargingDecommission:
 
         charging_adapter.update(state, data)
 
-        assert charging_adapter._is_charging_decommissioned is False
+        assert charging_adapter._charging.is_decommissioned is False
 
     def test_default_recharge_soc(
         self, mock_api, mock_node,
@@ -3156,11 +3156,11 @@ class TestChargingDecommission:
     ):
         """_is_charging_decommissioned은 _reset_order_state 이후 유지."""
         self._complete_charging(charging_adapter, mock_api)
-        assert charging_adapter._is_charging_decommissioned is True
+        assert charging_adapter._charging.is_decommissioned is True
 
         charging_adapter._reset_order_state()
 
-        assert charging_adapter._is_charging_decommissioned is True
+        assert charging_adapter._charging.is_decommissioned is True
 
 
 class TestPickDropFlow:
@@ -3253,7 +3253,7 @@ class TestPickDropFlow:
         pick_drop_adapter.cancel_cmd_attempt()
 
         # wp1(0,0) 좌표가 도착 판정 대상
-        assert pick_drop_adapter._navigate_target_position == [
+        assert pick_drop_adapter._nav.target_position == [
             0.0, 0.0,
         ]
 
@@ -3304,16 +3304,16 @@ class TestPickDropFlow:
         pick_drop_adapter.navigate(dest, MagicMock())
         pick_drop_adapter.cancel_cmd_attempt()
 
-        assert pick_drop_adapter._active_order_id is not None
+        assert pick_drop_adapter._order.active_order_id is not None
 
         pick_drop_adapter.position = [0.0, 0.0, 0.0]
         pick_drop_adapter.execute_action('pick', {}, MagicMock())
         pick_drop_adapter.cancel_cmd_attempt()
 
-        assert pick_drop_adapter._active_order_id is None
-        assert pick_drop_adapter._order_update_id == 0
-        assert pick_drop_adapter._last_stitch_seq_id == 0
-        assert pick_drop_adapter._pick_drop_destination is None
+        assert pick_drop_adapter._order.active_order_id is None
+        assert pick_drop_adapter._order.order_update_id == 0
+        assert pick_drop_adapter._order.last_stitch_seq_id == 0
+        assert pick_drop_adapter._pick_drop.destination is None
 
     def test_pickdrop_full_cart_delivery(
         self, pick_drop_adapter, mock_api
@@ -3328,9 +3328,9 @@ class TestPickDropFlow:
         pick_drop_adapter.navigate(dest1, MagicMock())
         pick_drop_adapter.cancel_cmd_attempt()
 
-        order_a = pick_drop_adapter._active_order_id
+        order_a = pick_drop_adapter._order.active_order_id
         assert order_a is not None
-        assert pick_drop_adapter._order_update_id == 0
+        assert pick_drop_adapter._order.order_update_id == 0
 
         # Phase 2: pick action at wp2
         pick_drop_adapter.position = [0.0, 0.0, 0.0]
@@ -3340,7 +3340,7 @@ class TestPickDropFlow:
         pick_drop_adapter.cancel_cmd_attempt()
 
         # order 리셋됨
-        assert pick_drop_adapter._active_order_id is None
+        assert pick_drop_adapter._order.active_order_id is None
 
         # Phase 3: navigate to wp3 (dropoff)
         pick_drop_adapter.position = [5.0, 0.0, 0.0]
@@ -3352,10 +3352,10 @@ class TestPickDropFlow:
         pick_drop_adapter.navigate(dest2, MagicMock())
         pick_drop_adapter.cancel_cmd_attempt()
 
-        order_b = pick_drop_adapter._active_order_id
+        order_b = pick_drop_adapter._order.active_order_id
         assert order_b is not None
         assert order_b != order_a  # 다른 orderID
-        assert pick_drop_adapter._order_update_id == 0
+        assert pick_drop_adapter._order.order_update_id == 0
 
         # Phase 4: drop action at wp3
         pick_drop_adapter.position = [5.0, 0.0, 0.0]
@@ -3365,7 +3365,7 @@ class TestPickDropFlow:
         pick_drop_adapter.cancel_cmd_attempt()
 
         # order 리셋됨
-        assert pick_drop_adapter._active_order_id is None
+        assert pick_drop_adapter._order.active_order_id is None
 
     def test_pickdrop_robot_at_destination(
         self, pick_drop_adapter, mock_api
@@ -3386,7 +3386,7 @@ class TestPickDropFlow:
         # order 미생성, 즉시 완료
         execution.finished.assert_called_once()
         assert pick_drop_adapter.execution is None
-        assert pick_drop_adapter._is_navigating is False
+        assert pick_drop_adapter._nav.is_navigating is False
         mock_api.navigate.assert_not_called()
 
     def test_pickdrop_go_to_place_reset(
@@ -3401,14 +3401,14 @@ class TestPickDropFlow:
         pick_drop_adapter.navigate(dest, MagicMock())
         pick_drop_adapter.cancel_cmd_attempt()
 
-        assert pick_drop_adapter._pick_drop_destination == 'wp2'
+        assert pick_drop_adapter._pick_drop.destination == 'wp2'
 
         pick_drop_adapter._reset_order_state()
         pick_drop_adapter.cancel_cmd_attempt()
 
         # cancelOrder 전송됨
         mock_api.stop.assert_called_once()
-        assert pick_drop_adapter._pick_drop_destination is None
+        assert pick_drop_adapter._pick_drop.destination is None
 
     def test_pickdrop_seq_continuity(
         self, pick_drop_adapter, mock_api
@@ -3464,7 +3464,7 @@ class TestPickDropFlow:
             assert node.released is True, (
                 f'{node.node_id} should be released (no pickDrop)'
             )
-        assert pick_drop_adapter._pick_drop_destination is None
+        assert pick_drop_adapter._pick_drop.destination is None
 
 
 class TestPickDropStationRemoval:
@@ -3558,7 +3558,7 @@ class TestPickDropStationRemoval:
         station_adapter.navigate(dest, MagicMock())
         station_adapter.cancel_cmd_attempt()
 
-        assert station_adapter._pick_drop_destination == 'wp3'
+        assert station_adapter._pick_drop.destination == 'wp3'
 
     def test_station_removal_station_saved(
         self, station_adapter, mock_api
@@ -3573,7 +3573,7 @@ class TestPickDropStationRemoval:
         station_adapter.navigate(dest, MagicMock())
         station_adapter.cancel_cmd_attempt()
 
-        assert station_adapter._pick_drop_station_node == 'wp4'
+        assert station_adapter._pick_drop.station_node == 'wp4'
 
     def test_station_removal_base_horizon(
         self, station_adapter, mock_api
@@ -3618,7 +3618,7 @@ class TestPickDropStationRemoval:
         station_adapter.cancel_cmd_attempt()
 
         # wp2(5,0) — pre-pickDrop node
-        assert station_adapter._navigate_target_position == [
+        assert station_adapter._nav.target_position == [
             5.0, 0.0,
         ]
 
@@ -3661,14 +3661,14 @@ class TestPickDropStationRemoval:
         station_adapter.navigate(dest, MagicMock())
         station_adapter.cancel_cmd_attempt()
 
-        assert station_adapter._pick_drop_station_node == 'wp4'
+        assert station_adapter._pick_drop.station_node == 'wp4'
 
         station_adapter.position = [5.0, 0.0, 0.0]
         station_adapter.execute_action('pick', {}, MagicMock())
         station_adapter.cancel_cmd_attempt()
 
-        assert station_adapter._pick_drop_station_node is None
-        assert station_adapter._pick_drop_destination is None
+        assert station_adapter._pick_drop.station_node is None
+        assert station_adapter._pick_drop.destination is None
 
     def test_station_removal_full_delivery(
         self, station_adapter, mock_api
@@ -3683,9 +3683,9 @@ class TestPickDropStationRemoval:
         station_adapter.navigate(dest1, MagicMock())
         station_adapter.cancel_cmd_attempt()
 
-        order_a = station_adapter._active_order_id
+        order_a = station_adapter._order.active_order_id
         assert order_a is not None
-        assert station_adapter._pick_drop_station_node == 'wp4'
+        assert station_adapter._pick_drop.station_node == 'wp4'
 
         # Phase 2: pick action
         station_adapter.position = [5.0, 0.0, 0.0]  # at wp2
@@ -3693,8 +3693,8 @@ class TestPickDropStationRemoval:
         station_adapter.cancel_cmd_attempt()
 
         # order 리셋
-        assert station_adapter._active_order_id is None
-        assert station_adapter._pick_drop_station_node is None
+        assert station_adapter._order.active_order_id is None
+        assert station_adapter._pick_drop.station_node is None
 
         # Phase 3: navigate to wp6 (drop station)
         mock_api.navigate.reset_mock()
@@ -3707,10 +3707,10 @@ class TestPickDropStationRemoval:
         station_adapter.navigate(dest2, MagicMock())
         station_adapter.cancel_cmd_attempt()
 
-        order_b = station_adapter._active_order_id
+        order_b = station_adapter._order.active_order_id
         assert order_b is not None
         assert order_b != order_a
-        assert station_adapter._pick_drop_station_node == 'wp6'
+        assert station_adapter._pick_drop.station_node == 'wp6'
 
         nodes = mock_api.navigate.call_args[0][2]
         node_ids = [n.node_id for n in nodes]
@@ -3730,7 +3730,7 @@ class TestPickDropStationRemoval:
             p.key: p.value for p in action.action_parameters
         }
         assert param_dict.get('stationName') == 'wp6'
-        assert station_adapter._active_order_id is None
+        assert station_adapter._order.active_order_id is None
 
     def test_station_removal_at_staging_node(
         self, station_adapter, mock_api
@@ -3751,7 +3751,7 @@ class TestPickDropStationRemoval:
         # station removal → path=[wp3], pickDrop early return
         execution.finished.assert_called_once()
         assert station_adapter.execution is None
-        assert station_adapter._is_navigating is False
+        assert station_adapter._nav.is_navigating is False
 
     def test_direct_pickdrop_unaffected(
         self, station_adapter, mock_api
@@ -3770,9 +3770,9 @@ class TestPickDropStationRemoval:
         station_adapter.cancel_cmd_attempt()
 
         # dest(wp3)에 pickDrop → 기존 시나리오
-        assert station_adapter._pick_drop_destination == 'wp3'
+        assert station_adapter._pick_drop.destination == 'wp3'
         # station node removal은 발생하지 않음
-        assert station_adapter._pick_drop_station_node is None
+        assert station_adapter._pick_drop.station_node is None
 
         nodes = mock_api.navigate.call_args[0][2]
         node_ids = [n.node_id for n in nodes]
