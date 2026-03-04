@@ -431,6 +431,14 @@ class RobotAdapter:
             start_node = goal_node
 
         # ── Step 1: destination에서 경로 추출 ──
+        # Charging: charger까지 경로 확장을 보장하기 위해
+        # _final_destination과 target을 charger로 강제 설정
+        if (
+            self._is_charging_pending
+            and self._charging_station_name
+            and self._charging_station_name in self.nav_nodes
+        ):
+            self._final_destination = self._charging_station_name
         target = self._final_destination or goal_node
         raw_waypoints = getattr(destination, 'waypoint_names', None)
         rmf_path = None
@@ -588,11 +596,8 @@ class RobotAdapter:
                 self.nav_nodes[pre_charger]['x'],
                 self.nav_nodes[pre_charger]['y'],
             ]
-            # base_end_index 재계산 (charger 제거로 인한 인덱스 조정)
-            if goal_node in path:
-                base_end_index = path.index(goal_node)
-            else:
-                base_end_index = len(path) - 1
+            # charger 제거 후 남은 노드 전부 base (pre-charger까지 도달 필요)
+            base_end_index = len(path) - 1
             rmf_path_end = len(path) - 1
             logger.info(
                 'Charging: removed charger node for robot %s, '

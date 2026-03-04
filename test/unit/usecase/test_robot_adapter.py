@@ -2848,6 +2848,162 @@ class TestCharging:
         assert charging_adapter._was_charging is False
 
 
+class TestChargingIntermediateDest:
+    """중간 노드가 dest이고 dock이 charger인 시나리오 테스트.
+
+    Graph:
+        wp1(0,0) --- wp2(5,0) --- wp3(5,5) --- charger_1(5,10)
+
+    RMF가 navigate(dest.name='wp2', dock='charger_1')을 보내는 경우:
+    - dest는 중간 노드(wp2)이지만 dock이 charger
+    - _final_destination이 charger로 설정되어 경로가 charger까지 확장
+    - charger 노드 제거 후 pre-charger(wp3)에 startCharging 부착
+    """
+
+    @pytest.fixture
+    def charging_adapter(self, mock_api, mock_node):
+        """Charger 노드가 포함된 어댑터."""
+        from vda5050_fleet_adapter.infra.nav_graph.graph_utils import (
+            create_graph,
+        )
+        nodes = {
+            'wp1': {'x': 0.0, 'y': 0.0, 'attributes': {}},
+            'wp2': {'x': 5.0, 'y': 0.0, 'attributes': {}},
+            'wp3': {'x': 5.0, 'y': 5.0, 'attributes': {}},
+            'charger_1': {'x': 5.0, 'y': 10.0, 'attributes': {}},
+        }
+        edges = {
+            'e0': {'start': 'wp1', 'end': 'wp2', 'attributes': {}},
+            'e1': {'start': 'wp2', 'end': 'wp1', 'attributes': {}},
+            'e2': {'start': 'wp2', 'end': 'wp3', 'attributes': {}},
+            'e3': {'start': 'wp3', 'end': 'wp2', 'attributes': {}},
+            'e4': {
+                'start': 'wp3', 'end': 'charger_1',
+                'attributes': {},
+            },
+            'e5': {
+                'start': 'charger_1', 'end': 'wp3',
+                'attributes': {},
+            },
+        }
+        graph = create_graph(nodes, edges)
+        robot = RobotAdapter(
+            name='AGV-001', api=mock_api, node=mock_node,
+            fleet_handle=MagicMock(),
+            nav_nodes=nodes, nav_edges=edges, nav_graph=graph,
+        )
+        robot.configuration = MagicMock()
+        mock_handle = MagicMock()
+        mock_handle.more.return_value.current_task_id \
+            .return_value = 'charge-task-001'
+        robot.update_handle = mock_handle
+        robot.position = [5.0, 0.0, 0.0]  # wp2 위치
+        return robot
+
+    def test_intermediate_dest_charger_excluded(
+        self, charging_adapter, mock_api
+    ):
+        """중간 dest + dock 시 charger 노드가 order에서 제외."""
+        dest = MagicMock()
+        dest.name = 'wp2'
+        dest.final_name = ''
+        dest.dock = 'charger_1'
+        dest.position = [5.0, 0.0, 0.0]
+        dest.map = 'map1'
+
+        charging_adapter.navigate(dest, MagicMock())
+        charging_adapter.cancel_cmd_attempt()
+
+        nodes = mock_api.navigate.call_args[0][2]
+        node_ids = [n.node_id for n in nodes]
+        assert 'charger_1' not in node_ids
+
+    def test_intermediate_dest_start_charging_on_pre_charger(
+        self, charging_adapter, mock_api
+    ):
+        """중간 dest + dock 시 startCharging이 pre-charger에 부착."""
+        dest = MagicMock()
+        dest.name = 'wp2'
+        dest.final_name = ''
+        dest.dock = 'charger_1'
+        dest.position = [5.0, 0.0, 0.0]
+        dest.map = 'map1'
+
+        charging_adapter.navigate(dest, MagicMock())
+        charging_adapter.cancel_cmd_attempt()
+
+        nodes = mock_api.navigate.call_args[0][2]
+        # pre-charger(wp3)가 마지막 노드이고 startCharging 부착
+        last_node = nodes[-1]
+        assert last_node.node_id == 'wp3'
+        charge_actions = [
+            a for a in last_node.actions
+            if a.action_type == 'startCharging'
+        ]
+        assert len(charge_actions) == 1
+
+    def test_intermediate_dest_all_nodes_base(
+        self, charging_adapter, mock_api
+    ):
+        """중간 dest + dock 시 charger 제거 후 모든 노드가 base."""
+        dest = MagicMock()
+        dest.name = 'wp2'
+        dest.final_name = ''
+        dest.dock = 'charger_1'
+        dest.position = [5.0, 0.0, 0.0]
+        dest.map = 'map1'
+
+        charging_adapter.navigate(dest, MagicMock())
+        charging_adapter.cancel_cmd_attempt()
+
+        nodes = mock_api.navigate.call_args[0][2]
+        for n in nodes:
+            assert n.released is True, (
+                f'Node {n.node_id} should be base (released)'
+            )
+
+    def test_intermediate_dest_navigate_target_pre_charger(
+        self, charging_adapter, mock_api
+    ):
+        """중간 dest + dock 시 도착 타겟이 pre-charger 좌표."""
+        dest = MagicMock()
+        dest.name = 'wp2'
+        dest.final_name = ''
+        dest.dock = 'charger_1'
+        dest.position = [5.0, 0.0, 0.0]
+        dest.map = 'map1'
+
+        charging_adapter.navigate(dest, MagicMock())
+        charging_adapter.cancel_cmd_attempt()
+
+        # wp3 좌표 (5.0, 5.0)
+        assert charging_adapter._navigate_target_position == [5.0, 5.0]
+
+    def test_intermediate_dest_station_name_param(
+        self, charging_adapter, mock_api
+    ):
+        """중간 dest + dock 시 stationName이 charger 이름."""
+        dest = MagicMock()
+        dest.name = 'wp2'
+        dest.final_name = ''
+        dest.dock = 'charger_1'
+        dest.position = [5.0, 0.0, 0.0]
+        dest.map = 'map1'
+
+        charging_adapter.navigate(dest, MagicMock())
+        charging_adapter.cancel_cmd_attempt()
+
+        nodes = mock_api.navigate.call_args[0][2]
+        last_node = nodes[-1]
+        charge_action = [
+            a for a in last_node.actions
+            if a.action_type == 'startCharging'
+        ][0]
+        param = charge_action.action_parameters[0]
+        assert param.key == 'stationName'
+        assert param.value == 'charger_1'
+
+
 class TestChargingDecommission:
     """충전 중 decommission / SOC 기반 recommission 테스트.
 
