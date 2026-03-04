@@ -307,7 +307,7 @@ class RobotAdapter:
         1 RMF Task = 1 orderID (새 Destination 시 order_update_id 증가).
 
         Args:
-            destination: RMF destination (position, map, dock 등).
+            destination: RMF destination (position, map 등).
             execution: RMF execution handle.
         """
         self.cmd_id += 1
@@ -315,18 +315,13 @@ class RobotAdapter:
         self._navigate_target_position = list(destination.position[:2])
         self._is_navigating = True
 
-        # 충전 태스크 감지: dock 파라미터 또는 destination의
-        # nav_graph 속성 is_charger로 판단
-        dock_name = getattr(destination, 'dock', None)
+        # 충전 태스크 감지: nav_graph 속성 is_charger로 판단
         dest_name_raw = getattr(destination, 'name', '')
         dest_node_attrs = self.nav_nodes.get(
             dest_name_raw, {}
         ).get('attributes', {})
         dest_is_charger = dest_node_attrs.get('is_charger', False)
-        if dock_name and isinstance(dock_name, str):
-            self._is_charging_pending = True
-            self._charging_station_name = dock_name
-        elif dest_is_charger and dest_name_raw:
+        if dest_is_charger and dest_name_raw:
             self._is_charging_pending = True
             self._charging_station_name = dest_name_raw
         else:
@@ -343,8 +338,7 @@ class RobotAdapter:
         self.node.get_logger().info(
             f'[{self.name}] navigate callback called, '
             f'dest={destination.position}, map={destination.map}, '
-            f'name={getattr(destination, "name", "")}, '
-            f'dock={dock_name}'
+            f'name={getattr(destination, "name", "")}'
         )
 
         # Use destination.name for exact waypoint match (if available)
