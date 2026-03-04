@@ -2829,6 +2829,74 @@ class TestCharging:
         assert len(stop_actions) == 1
         assert charging_adapter._was_charging is False
 
+    def test_intermediate_navigate_excludes_charger(
+        self, charging_adapter, mock_api
+    ):
+        """중간 dest로 navigate 시에도 charger가 order에 포함되지 않는다.
+
+        final_destination이 charger이지만 dest는 중간 노드(wp2)인 경우,
+        Tier 2로 charger까지 경로가 확장되지만 charger는 order에서 제거된다.
+        """
+        dest = MagicMock()
+        dest.name = 'wp2'
+        dest.final_name = 'charger_1'
+        dest.position = [5.0, 0.0, 0.0]
+        dest.map = 'map1'
+
+        charging_adapter.navigate(dest, MagicMock())
+        charging_adapter.cancel_cmd_attempt()
+
+        nodes = mock_api.navigate.call_args[0][2]
+        node_ids = [n.node_id for n in nodes]
+        assert 'charger_1' not in node_ids
+        # wp3 (pre-charger)가 horizon으로 포함
+        assert 'wp3' in node_ids
+
+    def test_intermediate_navigate_no_start_charging(
+        self, charging_adapter, mock_api
+    ):
+        """중간 dest navigate 시 startCharging이 부착되지 않는다."""
+        dest = MagicMock()
+        dest.name = 'wp2'
+        dest.final_name = 'charger_1'
+        dest.position = [5.0, 0.0, 0.0]
+        dest.map = 'map1'
+
+        charging_adapter.navigate(dest, MagicMock())
+        charging_adapter.cancel_cmd_attempt()
+
+        nodes = mock_api.navigate.call_args[0][2]
+        has_start_charging = any(
+            a.action_type == 'startCharging'
+            for n in nodes for a in n.actions
+        )
+        assert not has_start_charging
+
+    def test_intermediate_navigate_base_at_dest(
+        self, charging_adapter, mock_api
+    ):
+        """중간 dest navigate 시 base가 dest까지, 나머지 horizon."""
+        dest = MagicMock()
+        dest.name = 'wp2'
+        dest.final_name = 'charger_1'
+        dest.position = [5.0, 0.0, 0.0]
+        dest.map = 'map1'
+
+        charging_adapter.navigate(dest, MagicMock())
+        charging_adapter.cancel_cmd_attempt()
+
+        nodes = mock_api.navigate.call_args[0][2]
+        # wp1(base) → wp2(base) → wp3(horizon)
+        for n in nodes:
+            if n.node_id in ('wp1', 'wp2'):
+                assert n.released is True, (
+                    f'{n.node_id} should be base'
+                )
+            else:
+                assert n.released is False, (
+                    f'{n.node_id} should be horizon'
+                )
+
 
 class TestChargingDecommission:
     """충전 중 decommission / SOC 기반 recommission 테스트.

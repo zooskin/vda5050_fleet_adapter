@@ -425,14 +425,6 @@ class RobotAdapter:
             start_node = goal_node
 
         # ── Step 1: destination에서 경로 추출 ──
-        # Charging: charger까지 경로 확장을 보장하기 위해
-        # _final_destination과 target을 charger로 강제 설정
-        if (
-            self._is_charging_pending
-            and self._charging_station_name
-            and self._charging_station_name in self.nav_nodes
-        ):
-            self._final_destination = self._charging_station_name
         target = self._final_destination or goal_node
         raw_waypoints = getattr(destination, 'waypoint_names', None)
         rmf_path = None
@@ -582,22 +574,36 @@ class RobotAdapter:
                 base_end_index,
             )
 
-        # ── Charging: charger 노드 제거 + pre-charger에 도착 타겟 변경 ──
-        if self._is_charging_pending and len(path) >= 2:
+        # ── Charging: charger 노드를 경로에서 항상 제거 ──
+        # _final_destination이 is_charger 속성 노드이면,
+        # 경로 끝의 charger 노드를 제거한다 (모든 navigate 호출에서).
+        _final_is_charger = (
+            self._final_destination is not None
+            and self.nav_nodes.get(
+                self._final_destination, {}
+            ).get('attributes', {}).get('is_charger', False)
+        )
+        if (
+            _final_is_charger
+            and len(path) >= 2
+            and path[-1] == self._final_destination
+        ):
             path = path[:-1]
-            pre_charger = path[-1]
-            self._navigate_target_position = [
-                self.nav_nodes[pre_charger]['x'],
-                self.nav_nodes[pre_charger]['y'],
-            ]
-            # charger 제거 후 남은 노드 전부 base (pre-charger까지 도달 필요)
-            base_end_index = len(path) - 1
-            rmf_path_end = len(path) - 1
+            if rmf_path_end >= len(path):
+                rmf_path_end = len(path) - 1
+            if self._is_charging_pending:
+                # dest가 charger: pre-charger 도착 타겟, 전체 base
+                pre_charger = path[-1]
+                self._navigate_target_position = [
+                    self.nav_nodes[pre_charger]['x'],
+                    self.nav_nodes[pre_charger]['y'],
+                ]
+                base_end_index = len(path) - 1
             logger.info(
                 'Charging: removed charger node for robot %s, '
                 'pre_charger=%s, station=%s, path=%s',
-                self.name, pre_charger,
-                self._charging_station_name, path,
+                self.name, path[-1],
+                self._final_destination, path,
             )
 
         logger.info(
