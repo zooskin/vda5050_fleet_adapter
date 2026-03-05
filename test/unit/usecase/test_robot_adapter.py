@@ -3284,10 +3284,10 @@ class TestPickDropFlow:
         robot.position = [0.0, 0.0, 0.0]
         return robot
 
-    def test_pickdrop_navigate_base_horizon_split(
+    def test_pickdrop_navigate_removes_dest_from_path(
         self, pick_drop_adapter, mock_api
     ):
-        """Destination with pickDrop is horizon, preceding node is base."""
+        """PickDrop dest is removed from path, only pre-dest nodes remain."""
         dest = MagicMock()
         dest.name = 'wp2'
         dest.final_name = 'wp2'
@@ -3300,10 +3300,9 @@ class TestPickDropFlow:
         nodes = mock_api.navigate.call_args[0][2]
         node_ids = [n.node_id for n in nodes]
 
-        assert node_ids == ['wp1', 'wp2']
-        # wp1 = base (released), wp2 = horizon (not released)
+        # wp2(pickDrop)가 제거되어 wp1만 남음
+        assert node_ids == ['wp1']
         assert nodes[0].released is True
-        assert nodes[1].released is False
 
     def test_pickdrop_navigate_target_pre_dest(
         self, pick_drop_adapter, mock_api
@@ -3488,14 +3487,12 @@ class TestPickDropFlow:
         pick_drop_adapter.navigate(dest, MagicMock())
         pick_drop_adapter.cancel_cmd_attempt()
 
-        # Phase 1 nodes
+        # Phase 1 nodes: wp1만 (wp2 제거됨)
         nav_nodes = mock_api.navigate.call_args[0][2]
         nav_edges = mock_api.navigate.call_args[0][3]
-        # seq: wp1=0, edge=1, wp2=2
+        assert len(nav_nodes) == 1
         assert nav_nodes[0].sequence_id == 0
-        assert nav_nodes[1].sequence_id == 2
-        if nav_edges:
-            assert nav_edges[0].sequence_id == 1
+        assert len(nav_edges) == 0
 
         mock_api.navigate.reset_mock()
 
@@ -3595,7 +3592,7 @@ class TestPickDropStationRemoval:
     def test_station_removal_path(
         self, station_adapter, mock_api
     ):
-        """navigate(dest=wp4) → path에 wp4 없음, path[-1]=wp3."""
+        """navigate(dest=wp4) → wp4(station)과 wp3(pickDrop) 모두 제거."""
         dest = MagicMock()
         dest.name = 'wp4'
         dest.final_name = 'wp4'
@@ -3609,7 +3606,8 @@ class TestPickDropStationRemoval:
         node_ids = [n.node_id for n in nodes]
 
         assert 'wp4' not in node_ids
-        assert node_ids[-1] == 'wp3'
+        assert 'wp3' not in node_ids
+        assert node_ids[-1] == 'wp2'
 
     def test_station_removal_pick_drop_dest(
         self, station_adapter, mock_api
@@ -3641,10 +3639,10 @@ class TestPickDropStationRemoval:
 
         assert station_adapter._pick_drop.station_node == 'wp4'
 
-    def test_station_removal_base_horizon(
+    def test_station_removal_all_base(
         self, station_adapter, mock_api
     ):
-        """wp3=horizon, 그 이전=base."""
+        """PickDrop dest 제거 후 남은 노드는 모두 base."""
         dest = MagicMock()
         dest.name = 'wp4'
         dest.final_name = 'wp4'
@@ -3657,18 +3655,12 @@ class TestPickDropStationRemoval:
         nodes = mock_api.navigate.call_args[0][2]
         node_ids = [n.node_id for n in nodes]
 
-        # path: [wp1, wp2, wp3], wp3=pickDrop dest → horizon
-        assert 'wp3' in node_ids
-        wp3_idx = node_ids.index('wp3')
-        for i, node in enumerate(nodes):
-            if i < wp3_idx:
-                assert node.released is True, (
-                    f'{node.node_id} should be base'
-                )
-            elif i == wp3_idx:
-                assert node.released is False, (
-                    f'{node.node_id} should be horizon'
-                )
+        # path: [wp1, wp2] (wp3, wp4 제거됨), 모두 base
+        assert 'wp3' not in node_ids
+        for node in nodes:
+            assert node.released is True, (
+                f'{node.node_id} should be base'
+            )
 
     def test_station_removal_navigate_target(
         self, station_adapter, mock_api
@@ -3819,10 +3811,10 @@ class TestPickDropStationRemoval:
         assert station_adapter.execution is None
         assert station_adapter._nav.is_navigating is False
 
-    def test_direct_pickdrop_unaffected(
+    def test_direct_pickdrop_also_removes_dest(
         self, station_adapter, mock_api
     ):
-        """Dest 자체에 pickDrop 있는 기존 시나리오 동작 유지."""
+        """Dest 자체에 pickDrop 있는 시나리오도 dest를 path에서 제거."""
         station_adapter.position = [0.0, 0.0, 0.0]
 
         # wp3 자체가 pickDrop
@@ -3835,7 +3827,7 @@ class TestPickDropStationRemoval:
         station_adapter.navigate(dest, MagicMock())
         station_adapter.cancel_cmd_attempt()
 
-        # dest(wp3)에 pickDrop → 기존 시나리오
+        # dest(wp3)에 pickDrop
         assert station_adapter._pick_drop.destination == 'wp3'
         # station node removal은 발생하지 않음
         assert station_adapter._pick_drop.station_node is None
@@ -3843,8 +3835,9 @@ class TestPickDropStationRemoval:
         nodes = mock_api.navigate.call_args[0][2]
         node_ids = [n.node_id for n in nodes]
 
-        # wp3은 path에 존재 (제거되지 않음)
-        assert 'wp3' in node_ids
-        # wp1=base, wp2=base, wp3=horizon (기존 pickDrop 동작)
-        wp3_idx = node_ids.index('wp3')
-        assert nodes[wp3_idx].released is False
+        # wp3은 path에서 제거됨
+        assert 'wp3' not in node_ids
+        # wp1, wp2만 남고 모두 base
+        assert node_ids == ['wp1', 'wp2']
+        for node in nodes:
+            assert node.released is True

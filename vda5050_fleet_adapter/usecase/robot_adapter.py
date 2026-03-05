@@ -716,26 +716,35 @@ class RobotAdapter:
         else:
             base_end_index = len(path) - 1
 
-        # ── pickDrop: dest를 horizon으로 유지, 직전 노드까지 base ──
+        # ── pickDrop: dest를 path에서 완전 제거, 직전 노드까지만 ──
+        # Phase 2(execute_action)에서 pickDrop dest가 action과 함께
+        # 처음 등장하도록 Phase 1에서는 제거한다.
         if (
             self._pick_drop.destination is not None
             and len(path) >= 2
-            and base_end_index >= 1
         ):
-            base_end_index -= 1
-            pre_pick_drop = path[base_end_index]
-            self._nav.target_position = [
-                self.nav_nodes[pre_pick_drop]['x'],
-                self.nav_nodes[pre_pick_drop]['y'],
-            ]
-            logger.info(
-                'pickDrop: base_end adjusted for robot %s, '
-                'pre_dest=%s, pick_drop_dest=%s, '
-                'base_end_index=%d',
-                self.name, pre_pick_drop,
-                self._pick_drop.destination,
-                base_end_index,
-            )
+            pick_drop_idx = None
+            for i, node in enumerate(path):
+                if node == self._pick_drop.destination:
+                    pick_drop_idx = i
+                    break
+            if pick_drop_idx is not None and pick_drop_idx >= 1:
+                path = path[:pick_drop_idx]
+                pre_pick_drop = path[-1]
+                base_end_index = len(path) - 1
+                self._nav.target_position = [
+                    self.nav_nodes[pre_pick_drop]['x'],
+                    self.nav_nodes[pre_pick_drop]['y'],
+                ]
+                if rmf_path_end >= len(path):
+                    rmf_path_end = len(path) - 1
+                logger.info(
+                    'pickDrop: removed dest from path for robot %s, '
+                    'pre_dest=%s, pick_drop_dest=%s, '
+                    'path=%s',
+                    self.name, pre_pick_drop,
+                    self._pick_drop.destination, path,
+                )
 
         # ── Charging: charger 노드를 경로에서 항상 제거 ──
         _final_is_charger = (
