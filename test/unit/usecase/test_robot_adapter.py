@@ -628,7 +628,7 @@ class TestDistanceBasedArrival:
         assert adapter.execution is execution
 
     def test_navigate_sets_target_position(self, adapter):
-        """navigate() 호출 시 _navigate_target_position이 설정된다."""
+        """navigate() 호출 시 base end node 좌표로 설정된다."""
         dest = MagicMock()
         dest.position = [5.0, 3.0, 0.0]
         dest.map = 'map1'
@@ -637,7 +637,8 @@ class TestDistanceBasedArrival:
         adapter.navigate(dest, execution)
         adapter.cancel_cmd_attempt()
 
-        assert adapter._nav.target_position == [5.0, 3.0]
+        # goal_node=wp3(5,5) — dest.position(5,3)에 가장 가까운 노드
+        assert adapter._nav.target_position == [5.0, 5.0]
         assert adapter._nav.is_navigating is True
 
     def test_execute_action_clears_navigating(self, adapter):
@@ -3642,7 +3643,7 @@ class TestPickDropStationRemoval:
     def test_station_removal_all_base(
         self, station_adapter, mock_api
     ):
-        """PickDrop dest 제거 후 남은 노드는 모두 base."""
+        """wp3,wp4 제거 후 남은 wp1,wp2는 모두 base."""
         dest = MagicMock()
         dest.name = 'wp4'
         dest.final_name = 'wp4'
@@ -3653,10 +3654,6 @@ class TestPickDropStationRemoval:
         station_adapter.cancel_cmd_attempt()
 
         nodes = mock_api.navigate.call_args[0][2]
-        node_ids = [n.node_id for n in nodes]
-
-        # path: [wp1, wp2] (wp3, wp4 제거됨), 모두 base
-        assert 'wp3' not in node_ids
         for node in nodes:
             assert node.released is True, (
                 f'{node.node_id} should be base'

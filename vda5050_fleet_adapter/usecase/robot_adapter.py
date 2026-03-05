@@ -389,6 +389,13 @@ class RobotAdapter:
             path, goal_node, target,
         )
 
+        # 도착 판정용 target_position을 base end node 좌표로 설정
+        base_end_name = path[base_end_index]
+        self._nav.target_position = [
+            self.nav_nodes[base_end_name]['x'],
+            self.nav_nodes[base_end_name]['y'],
+        ]
+
         # ── VDA5050 Node/Edge 생성 ──
         seq_start = (
             self._order.last_stitch_seq_id
@@ -652,14 +659,24 @@ class RobotAdapter:
             if pre_dest_attrs.get('pickDrop', False):
                 self._pick_drop.station_node = path[-1]
                 self._pick_drop.destination = pre_dest
-                path = path[:-1]
-                target = pre_dest
-                self._order.final_destination = pre_dest
+                if len(path) >= 3:
+                    # station + pickDrop 둘 다 제거,
+                    # final_dest를 pickDrop 전 노드로 설정
+                    path = path[:-2]
+                    target = path[-1]
+                    self._order.final_destination = path[-1]
+                else:
+                    # 로봇이 staging 근처: station만 제거
+                    path = path[:-1]
+                    target = pre_dest
+                    self._order.final_destination = pre_dest
                 logger.info(
-                    'Station node removal for %s: removed %s, '
-                    'pickDrop staging=%s',
+                    'Station node removal for %s: '
+                    'removed station=%s, staging=%s, '
+                    'final_dest=%s, path=%s',
                     self.name, self._pick_drop.station_node,
-                    pre_dest,
+                    pre_dest, self._order.final_destination,
+                    path,
                 )
 
         return path, target
@@ -732,10 +749,6 @@ class RobotAdapter:
                 path = path[:pick_drop_idx]
                 pre_pick_drop = path[-1]
                 base_end_index = len(path) - 1
-                self._nav.target_position = [
-                    self.nav_nodes[pre_pick_drop]['x'],
-                    self.nav_nodes[pre_pick_drop]['y'],
-                ]
                 if rmf_path_end >= len(path):
                     rmf_path_end = len(path) - 1
                 logger.info(
@@ -763,11 +776,6 @@ class RobotAdapter:
                 rmf_path_end = len(path) - 1
             if self._charging.is_pending:
                 # dest가 charger: pre-charger 도착 타겟, 전체 base
-                pre_charger = path[-1]
-                self._nav.target_position = [
-                    self.nav_nodes[pre_charger]['x'],
-                    self.nav_nodes[pre_charger]['y'],
-                ]
                 base_end_index = len(path) - 1
             logger.info(
                 'Charging: removed charger node for robot %s, '
