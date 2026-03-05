@@ -538,6 +538,10 @@ class Vda5050RobotAPI(RobotAPI):
         if state is None or order_or_action_id is None:
             return False
 
+        # 에러가 있으면 완료 처리하지 않음 - 작업자가 에러를 해결할 때까지 대기
+        if state.has_errors:
+            return False
+
         # Order 완료 확인: released(base) 노드가 없고 driving=False
         # Horizon 노드는 nodeStates에 남아있을 수 있으므로
         # released 노드만 확인한다.
@@ -562,11 +566,11 @@ class Vda5050RobotAPI(RobotAPI):
                     return True
         else:
             # InstantAction 완료 확인
+            # FAILED는 완료로 처리하지 않음 - 작업자가 에러 해결 후
+            # 로봇이 재시도하여 FINISHED가 될 때까지 대기
             for action_state in state.action_states:
                 if action_state.action_id == order_or_action_id:
-                    if action_state.action_status in (
-                        ActionStatus.FINISHED, ActionStatus.FAILED
-                    ):
+                    if action_state.action_status == ActionStatus.FINISHED:
                         with self._lock:
                             self._completed_cmds.setdefault(
                                 robot_name, set()
