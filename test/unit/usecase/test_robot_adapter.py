@@ -2031,20 +2031,33 @@ class TestExecuteActionAsOrderUpdate:
         mock_api.navigate.assert_called_once()
         mock_api.start_activity.assert_not_called()
 
-    def test_action_without_active_order_sends_instant(
+    def test_action_without_active_order_sends_new_order(
         self, adapter_with_handle, mock_api
     ):
-        """Active order 없으면 기존 instantAction 방식 사용."""
+        """Active order 없으면 단일 노드 order로 action을 전송."""
         adapter_with_handle.position = [0.0, 0.0, 0.0]
         assert adapter_with_handle._order.active_order_id is None
 
         adapter_with_handle.execute_action(
-            'charge', {}, MagicMock()
+            'pick', {}, MagicMock()
         )
         adapter_with_handle.cancel_cmd_attempt()
 
-        mock_api.start_activity.assert_called_once()
-        mock_api.navigate.assert_not_called()
+        mock_api.start_activity.assert_not_called()
+        mock_api.navigate.assert_called_once()
+
+        call_args = mock_api.navigate.call_args
+        nodes = call_args[0][2]
+        edges = call_args[0][3]
+        order_id = call_args[0][5]
+        update_id = call_args[0][6]
+
+        assert len(nodes) == 1
+        assert len(edges) == 0
+        assert order_id.startswith('order_')
+        assert update_id == 0
+        assert len(nodes[0].actions) == 1
+        assert nodes[0].actions[0].action_type == 'pick'
 
     def test_action_order_update_uses_same_order_id(
         self, adapter_with_handle, mock_api

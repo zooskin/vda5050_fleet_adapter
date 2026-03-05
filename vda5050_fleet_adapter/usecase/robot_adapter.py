@@ -967,7 +967,8 @@ class RobotAdapter:
         """RMF 액션 실행 콜백.
 
         Active order가 있으면 VDA5050 nodeAction으로 order update를 전송한다.
-        Active order가 없으면 기존 instantAction 방식을 사용한다.
+        Active order가 없으면 단일 노드 order를 생성하여 action을 전송한다.
+        Position 정보가 없는 경우에만 instantAction fallback을 사용한다.
 
         Args:
             category: 액션 카테고리 (pick, drop, charge 등).
@@ -987,16 +988,99 @@ class RobotAdapter:
 
         params = description if isinstance(description, dict) else {}
 
-        if (
-            self._order.active_order_id is not None
-            and self.position is not None
-        ):
-            self._execute_action_as_order_update(category, params)
+        if self.position is not None:
+            if self._order.active_order_id is not None:
+                self._execute_action_as_order_update(category, params)
+            else:
+                self._execute_action_as_new_order(category, params)
         else:
             self.attempt_cmd_until_success(
                 cmd=self.api.start_activity,
                 args=(self.name, self.cmd_id, category, params),
             )
+
+    def _execute_action_as_new_order(
+        self, category: str, params: dict,
+    ) -> None:
+        """Active order 없이 단일 노드 order로 action을 전송한다.
+
+        로봇이 이미 pickDrop 노드에 있어서 navigate가 즉시 완료된 경우,
+        새 order를 생성하여 현재 노드에 action을 부착한다.
+
+        Args:
+            category: 액션 종류 (e.g. 'pick', 'drop').
+            params: 액션 파라미터 dict.
+        """
+        from vda5050_fleet_adapter.domain.entities.action import (
+            Action, ActionParameter,
+        )
+        from vda5050_fleet_adapter.domain.enums import BlockingType
+
+        current_node = find_nearest_node(
+            self.nav_nodes, self.position[0], self.position[1]
+        )
+        if current_node is None:
+            logger.error(
+                'No nearest node for action, robot %s', self.name,
+            )
+            return
+
+        action_id = (
+            f'{category}_{self.cmd_id}_{uuid.uuid4().hex[:8]}'
+        )
+        action_params = [
+            ActionParameter(key=k, value=v)
+            for k, v in params.items()
+        ]
+        action = Action(
+            action_type=category,
+            action_id=action_id,
+            blocking_type=BlockingType.HARD,
+            action_parameters=action_params,
+        )
+
+        # 새 order 생성
+        order_id = f'order_{self.cmd_id}_{uuid.uuid4().hex[:8]}'
+        map_name = self._order.last_map or 'map1'
+
+        vda_nodes, vda_edges = build_vda5050_nodes_edges(
+            [current_node], self.nav_nodes, map_name,
+            base_end_index=0,
+            seq_start=0,
+            edges=self.nav_edges,
+        )
+        vda_nodes[0].actions.append(action)
+
+        logger.info(
+            'Action as new order [%s]: category=%s, '
+            'action_id=%s, order_id=%s, node=%s',
+            self.name, category, action_id,
+            order_id, current_node,
+        )
+
+        nav_args = (
+            self.name,
+            self.cmd_id,
+            vda_nodes,
+            vda_edges,
+            map_name,
+            order_id,
+            0,
+        )
+
+        self.attempt_cmd_until_success(
+            cmd=lambda *a: self.api.navigate(
+                *a, track_action_id=action_id
+            ),
+            args=nav_args,
+        )
+
+        # Order 라이프사이클 리셋: 다음 navigate가 새 orderID 생성
+        self._order.active_order_id = None
+        self._order.order_update_id = 0
+        self._order.last_stitch_seq_id = 0
+        self._pick_drop.destination = None
+        self._pick_drop.station_node = None
 
     def _execute_action_as_order_update(
         self, category: str, params: dict,
