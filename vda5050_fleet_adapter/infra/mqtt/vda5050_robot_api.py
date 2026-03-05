@@ -538,8 +538,9 @@ class Vda5050RobotAPI(RobotAPI):
         if state is None or order_or_action_id is None:
             return False
 
-        # 에러가 있으면 완료 처리하지 않음 - 작업자가 에러를 해결할 때까지 대기
-        if state.has_errors:
+        # FATAL 에러가 있으면 완료 처리하지 않음 - 작업자가 에러를 해결할 때까지 대기
+        # WARNING 레벨은 AGV 동작 가능하므로 완료 처리 허용
+        if state.has_fatal_error:
             return False
 
         # Order 완료 확인: released(base) 노드가 없고 driving=False
