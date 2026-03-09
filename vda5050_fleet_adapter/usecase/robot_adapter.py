@@ -54,6 +54,7 @@ class OrderState:
     last_stitch_seq_id: int = 0
     last_map: str | None = None
     last_nodes: list = field(default_factory=list)
+    completed_normally: bool = False
 
 
 @dataclass
@@ -160,6 +161,7 @@ class RobotAdapter:
             if completed:
                 self.execution.finished()
                 self.execution = None
+                self._order.completed_normally = True
                 self._nav = NavigationState()
                 self._charging.is_active = False
                 self._charging.is_pending = False
@@ -1435,17 +1437,24 @@ class RobotAdapter:
         self._pick_drop.station_node = None
 
         if self._order.active_order_id is not None:
-            self.cmd_id += 1
-            logger.info(
-                'Task ended, sending cancelOrder for robot %s, '
-                'order_id=%s, cmd_id=%d',
-                self.name, self._order.active_order_id,
-                self.cmd_id,
-            )
-            self.attempt_cmd_until_success(
-                cmd=self.api.stop,
-                args=(self.name, self.cmd_id),
-            )
+            if self._order.completed_normally:
+                logger.info(
+                    'Task completed normally, skipping cancelOrder '
+                    'for robot %s, order_id=%s',
+                    self.name, self._order.active_order_id,
+                )
+            else:
+                self.cmd_id += 1
+                logger.info(
+                    'Task ended abnormally, sending cancelOrder '
+                    'for robot %s, order_id=%s, cmd_id=%d',
+                    self.name, self._order.active_order_id,
+                    self.cmd_id,
+                )
+                self.attempt_cmd_until_success(
+                    cmd=self.api.stop,
+                    args=(self.name, self.cmd_id),
+                )
 
         self._nav = NavigationState()
         self._charging.is_active = False

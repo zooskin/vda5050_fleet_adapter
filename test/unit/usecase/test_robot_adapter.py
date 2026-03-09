@@ -375,8 +375,8 @@ class TestRobotAdapterUpdate:
         assert adapter._order.active_order_id is None
         assert adapter._order.order_update_id == 0
         assert adapter._order.final_destination is None
-        # Task 종료 시 cancelOrder 전송
-        mock_api.stop.assert_called_once()
+        # 정상 도착이므로 cancelOrder 미전송
+        mock_api.stop.assert_not_called()
 
     def test_update_keeps_execution_if_not_completed(
         self, adapter, mock_api
@@ -1313,10 +1313,10 @@ class TestNegotiation:
 class TestTaskCancelSendsCancelOrder:
     """Task cancel 시 cancelOrder 전송 테스트."""
 
-    def test_cancel_after_navigate_completes_sends_cancel_order(
+    def test_no_cancel_after_normal_completion(
         self, adapter_with_handle, mock_api
     ):
-        """Navigate 완료 후 task가 끝나면 cancelOrder를 전송한다."""
+        """정상 도착 후 task 종료 시 cancelOrder를 전송하지 않는다."""
         adapter = adapter_with_handle
 
         # navigate 상태를 직접 설정 (thread 의존성 제거)
@@ -1328,7 +1328,7 @@ class TestTaskCancelSendsCancelOrder:
 
         mock_api.stop.assert_not_called()
 
-        # navigate 도착 → execution 완료
+        # navigate 도착 → execution 완료 (completed_normally=True)
         state = MagicMock()
         data = RobotUpdateData(
             robot_name='AGV-001', map_name='map1',
@@ -1339,13 +1339,46 @@ class TestTaskCancelSendsCancelOrder:
         # execution 완료, order는 아직 유지 (task 진행 중)
         assert adapter.execution is None
         assert adapter._order.active_order_id == 'order-cancel-test'
+        assert adapter._order.completed_normally is True
 
-        # task cancel: task_id가 빈 문자열로 변경
+        # task 종료: task_id가 빈 문자열로 변경
         adapter.update_handle.more.return_value \
             .current_task_id.return_value = ''
         adapter.update(state, data)
         adapter.cancel_cmd_attempt()
 
+        # 정상 도착이므로 cancelOrder 미전송
+        mock_api.stop.assert_not_called()
+        assert adapter._order.active_order_id is None
+
+    def test_cancel_when_task_aborted_before_arrival(
+        self, adapter_with_handle, mock_api
+    ):
+        """도착 전 task 취소 시 cancelOrder를 전송한다."""
+        adapter = adapter_with_handle
+
+        # navigate 상태 설정 (아직 도착 안 함)
+        adapter.execution = MagicMock()
+        adapter._order.active_order_id = 'order-cancel-test'
+        adapter._order.current_task_id = 'compose.dispatch-001'
+        adapter._nav.is_navigating = True
+        adapter._nav.target_position = [5.0, 0.0]
+
+        # execution을 외부에서 제거 (task abort 시뮬레이션)
+        adapter.execution = None
+
+        # task cancel: task_id가 빈 문자열로 변경
+        state = MagicMock()
+        data = RobotUpdateData(
+            robot_name='AGV-001', map_name='map1',
+            position=[1.0, 0.0, 0.0], battery_soc=0.85,
+        )
+        adapter.update_handle.more.return_value \
+            .current_task_id.return_value = ''
+        adapter.update(state, data)
+        adapter.cancel_cmd_attempt()
+
+        # 비정상 종료이므로 cancelOrder 전송
         mock_api.stop.assert_called_once()
         assert adapter._order.active_order_id is None
 
