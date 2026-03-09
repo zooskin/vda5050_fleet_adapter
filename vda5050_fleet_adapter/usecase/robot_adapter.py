@@ -167,8 +167,32 @@ class RobotAdapter:
                 self._charging.is_pending = False
                 self._charging.station_name = None
                 self._charging.action_id = None
-            elif not self._charging.is_active:
-                activity_identifier = self.execution.identifier
+            else:
+                # Task 취소 감지: execution이 남아있지만 task_id가 변경된 경우
+                if self._order.current_task_id is not None:
+                    current_task_id = self._get_current_task_id()
+                    task_cancelled = (
+                        current_task_id is None
+                        or current_task_id == ''
+                        or current_task_id != self._order.current_task_id
+                    )
+                    if task_cancelled:
+                        logger.info(
+                            'Task cancelled while executing: '
+                            'robot=%s, old_task=%s, new_task=%s',
+                            self.name,
+                            self._order.current_task_id,
+                            current_task_id,
+                        )
+                        self.execution = None
+                        self.cancel_cmd_attempt()
+                        self._reset_order_state()
+
+                if (
+                    self.execution is not None
+                    and not self._charging.is_active
+                ):
+                    activity_identifier = self.execution.identifier
 
         # Task 완료 감지: task_id가 변경되거나 비어있으면 order 리셋
         if self._order.active_order_id is not None and self.execution is None:
@@ -1436,25 +1460,26 @@ class RobotAdapter:
         self._pick_drop.destination = None
         self._pick_drop.station_node = None
 
-        if self._order.active_order_id is not None:
-            if self._order.completed_normally:
-                logger.info(
-                    'Task completed normally, skipping cancelOrder '
-                    'for robot %s, order_id=%s',
-                    self.name, self._order.active_order_id,
-                )
-            else:
-                self.cmd_id += 1
-                logger.info(
-                    'Task ended abnormally, sending cancelOrder '
-                    'for robot %s, order_id=%s, cmd_id=%d',
-                    self.name, self._order.active_order_id,
-                    self.cmd_id,
-                )
-                self.attempt_cmd_until_success(
-                    cmd=self.api.stop,
-                    args=(self.name, self.cmd_id),
-                )
+        if self._order.current_task_id is None:
+            pass  # task가 없었으므로 cancelOrder 불필요
+        elif self._order.completed_normally:
+            logger.info(
+                'Task completed normally, skipping cancelOrder '
+                'for robot %s, order_id=%s',
+                self.name, self._order.active_order_id,
+            )
+        else:
+            self.cmd_id += 1
+            logger.info(
+                'Task ended abnormally, sending cancelOrder '
+                'for robot %s, order_id=%s, cmd_id=%d',
+                self.name, self._order.active_order_id,
+                self.cmd_id,
+            )
+            self.attempt_cmd_until_success(
+                cmd=self.api.stop,
+                args=(self.name, self.cmd_id),
+            )
 
         self._nav = NavigationState()
         self._charging.is_active = False

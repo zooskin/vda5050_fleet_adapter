@@ -1326,6 +1326,10 @@ class TestTaskCancelSendsCancelOrder:
         adapter._nav.is_navigating = True
         adapter._nav.target_position = [5.0, 0.0]
 
+        # task 진행 중이므로 current_task_id는 동일한 값 반환
+        adapter.update_handle.more.return_value \
+            .current_task_id.return_value = 'compose.dispatch-001'
+
         mock_api.stop.assert_not_called()
 
         # navigate 도착 → execution 완료 (completed_normally=True)
@@ -1380,6 +1384,39 @@ class TestTaskCancelSendsCancelOrder:
 
         # 비정상 종료이므로 cancelOrder 전송
         mock_api.stop.assert_called_once()
+        assert adapter._order.active_order_id is None
+
+    def test_cancel_task_request_with_execution_alive(
+        self, adapter_with_handle, mock_api
+    ):
+        """execution이 살아있는 상태에서 task 취소 시 cancelOrder를 전송한다.
+
+        cancel_task_request 시 RMF가 stop() 콜백을 호출하지 않아
+        execution이 남아있는 경우를 커버한다.
+        """
+        adapter = adapter_with_handle
+
+        # navigate 상태 설정 (이동 중)
+        adapter.execution = MagicMock()
+        adapter._order.active_order_id = 'order-cancel-req'
+        adapter._order.current_task_id = 'compose.dispatch-002'
+        adapter._nav.is_navigating = True
+        adapter._nav.target_position = [10.0, 10.0]
+
+        # task cancel: task_id가 빈 문자열로 변경 (execution은 유지)
+        state = MagicMock()
+        data = RobotUpdateData(
+            robot_name='AGV-001', map_name='map1',
+            position=[1.0, 0.0, 0.0], battery_soc=0.85,
+        )
+        adapter.update_handle.more.return_value \
+            .current_task_id.return_value = ''
+        adapter.update(state, data)
+        adapter.cancel_cmd_attempt()
+
+        # execution이 살아있었지만 cancelOrder 전송
+        mock_api.stop.assert_called_once()
+        assert adapter.execution is None
         assert adapter._order.active_order_id is None
 
     def test_no_cancel_order_when_no_active_order(
