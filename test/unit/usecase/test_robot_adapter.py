@@ -375,8 +375,8 @@ class TestRobotAdapterUpdate:
         assert adapter._order.active_order_id is None
         assert adapter._order.order_update_id == 0
         assert adapter._order.final_destination is None
-        # Task 종료 시 cancelOrder 전송
-        mock_api.stop.assert_called_once()
+        # 정상 도착이므로 cancelOrder 미전송
+        mock_api.stop.assert_not_called()
 
     def test_update_keeps_execution_if_not_completed(
         self, adapter, mock_api
@@ -628,7 +628,7 @@ class TestDistanceBasedArrival:
         assert adapter.execution is execution
 
     def test_navigate_sets_target_position(self, adapter):
-        """navigate() 호출 시 _navigate_target_position이 설정된다."""
+        """navigate() 호출 시 base end node 좌표로 설정된다."""
         dest = MagicMock()
         dest.position = [5.0, 3.0, 0.0]
         dest.map = 'map1'
@@ -637,7 +637,8 @@ class TestDistanceBasedArrival:
         adapter.navigate(dest, execution)
         adapter.cancel_cmd_attempt()
 
-        assert adapter._nav.target_position == [5.0, 3.0]
+        # goal_node=wp3(5,5) — dest.position(5,3)에 가장 가까운 노드
+        assert adapter._nav.target_position == [5.0, 5.0]
         assert adapter._nav.is_navigating is True
 
     def test_execute_action_clears_navigating(self, adapter):
@@ -1312,10 +1313,10 @@ class TestNegotiation:
 class TestTaskCancelSendsCancelOrder:
     """Task cancel 시 cancelOrder 전송 테스트."""
 
-    def test_cancel_after_navigate_completes_sends_cancel_order(
+    def test_no_cancel_after_normal_completion(
         self, adapter_with_handle, mock_api
     ):
-        """Navigate 완료 후 task가 끝나면 cancelOrder를 전송한다."""
+        """정상 도착 후 task 종료 시 cancelOrder를 전송하지 않는다."""
         adapter = adapter_with_handle
 
         # navigate 상태를 직접 설정 (thread 의존성 제거)
@@ -1325,9 +1326,13 @@ class TestTaskCancelSendsCancelOrder:
         adapter._nav.is_navigating = True
         adapter._nav.target_position = [5.0, 0.0]
 
+        # task 진행 중이므로 current_task_id는 동일한 값 반환
+        adapter.update_handle.more.return_value \
+            .current_task_id.return_value = 'compose.dispatch-001'
+
         mock_api.stop.assert_not_called()
 
-        # navigate 도착 → execution 완료
+        # navigate 도착 → execution 완료 (completed_normally=True)
         state = MagicMock()
         data = RobotUpdateData(
             robot_name='AGV-001', map_name='map1',
@@ -1338,14 +1343,80 @@ class TestTaskCancelSendsCancelOrder:
         # execution 완료, order는 아직 유지 (task 진행 중)
         assert adapter.execution is None
         assert adapter._order.active_order_id == 'order-cancel-test'
+        assert adapter._order.completed_normally is True
 
-        # task cancel: task_id가 빈 문자열로 변경
+        # task 종료: task_id가 빈 문자열로 변경
         adapter.update_handle.more.return_value \
             .current_task_id.return_value = ''
         adapter.update(state, data)
         adapter.cancel_cmd_attempt()
 
+        # 정상 도착이므로 cancelOrder 미전송
+        mock_api.stop.assert_not_called()
+        assert adapter._order.active_order_id is None
+
+    def test_cancel_when_task_aborted_before_arrival(
+        self, adapter_with_handle, mock_api
+    ):
+        """도착 전 task 취소 시 cancelOrder를 전송한다."""
+        adapter = adapter_with_handle
+
+        # navigate 상태 설정 (아직 도착 안 함)
+        adapter.execution = MagicMock()
+        adapter._order.active_order_id = 'order-cancel-test'
+        adapter._order.current_task_id = 'compose.dispatch-001'
+        adapter._nav.is_navigating = True
+        adapter._nav.target_position = [5.0, 0.0]
+
+        # execution을 외부에서 제거 (task abort 시뮬레이션)
+        adapter.execution = None
+
+        # task cancel: task_id가 빈 문자열로 변경
+        state = MagicMock()
+        data = RobotUpdateData(
+            robot_name='AGV-001', map_name='map1',
+            position=[1.0, 0.0, 0.0], battery_soc=0.85,
+        )
+        adapter.update_handle.more.return_value \
+            .current_task_id.return_value = ''
+        adapter.update(state, data)
+        adapter.cancel_cmd_attempt()
+
+        # 비정상 종료이므로 cancelOrder 전송
         mock_api.stop.assert_called_once()
+        assert adapter._order.active_order_id is None
+
+    def test_cancel_task_request_with_execution_alive(
+        self, adapter_with_handle, mock_api
+    ):
+        """execution이 살아있는 상태에서 task 취소 시 cancelOrder를 전송한다.
+
+        cancel_task_request 시 RMF가 stop() 콜백을 호출하지 않아
+        execution이 남아있는 경우를 커버한다.
+        """
+        adapter = adapter_with_handle
+
+        # navigate 상태 설정 (이동 중)
+        adapter.execution = MagicMock()
+        adapter._order.active_order_id = 'order-cancel-req'
+        adapter._order.current_task_id = 'compose.dispatch-002'
+        adapter._nav.is_navigating = True
+        adapter._nav.target_position = [10.0, 10.0]
+
+        # task cancel: task_id가 빈 문자열로 변경 (execution은 유지)
+        state = MagicMock()
+        data = RobotUpdateData(
+            robot_name='AGV-001', map_name='map1',
+            position=[1.0, 0.0, 0.0], battery_soc=0.85,
+        )
+        adapter.update_handle.more.return_value \
+            .current_task_id.return_value = ''
+        adapter.update(state, data)
+        adapter.cancel_cmd_attempt()
+
+        # execution이 살아있었지만 cancelOrder 전송
+        mock_api.stop.assert_called_once()
+        assert adapter.execution is None
         assert adapter._order.active_order_id is None
 
     def test_no_cancel_order_when_no_active_order(
@@ -3284,10 +3355,10 @@ class TestPickDropFlow:
         robot.position = [0.0, 0.0, 0.0]
         return robot
 
-    def test_pickdrop_navigate_base_horizon_split(
+    def test_pickdrop_navigate_removes_dest_from_path(
         self, pick_drop_adapter, mock_api
     ):
-        """Destination with pickDrop is horizon, preceding node is base."""
+        """PickDrop dest is removed from path, only pre-dest nodes remain."""
         dest = MagicMock()
         dest.name = 'wp2'
         dest.final_name = 'wp2'
@@ -3300,10 +3371,9 @@ class TestPickDropFlow:
         nodes = mock_api.navigate.call_args[0][2]
         node_ids = [n.node_id for n in nodes]
 
-        assert node_ids == ['wp1', 'wp2']
-        # wp1 = base (released), wp2 = horizon (not released)
+        # wp2(pickDrop)가 제거되어 wp1만 남음
+        assert node_ids == ['wp1']
         assert nodes[0].released is True
-        assert nodes[1].released is False
 
     def test_pickdrop_navigate_target_pre_dest(
         self, pick_drop_adapter, mock_api
@@ -3488,14 +3558,12 @@ class TestPickDropFlow:
         pick_drop_adapter.navigate(dest, MagicMock())
         pick_drop_adapter.cancel_cmd_attempt()
 
-        # Phase 1 nodes
+        # Phase 1 nodes: wp1만 (wp2 제거됨)
         nav_nodes = mock_api.navigate.call_args[0][2]
         nav_edges = mock_api.navigate.call_args[0][3]
-        # seq: wp1=0, edge=1, wp2=2
+        assert len(nav_nodes) == 1
         assert nav_nodes[0].sequence_id == 0
-        assert nav_nodes[1].sequence_id == 2
-        if nav_edges:
-            assert nav_edges[0].sequence_id == 1
+        assert len(nav_edges) == 0
 
         mock_api.navigate.reset_mock()
 
@@ -3595,7 +3663,7 @@ class TestPickDropStationRemoval:
     def test_station_removal_path(
         self, station_adapter, mock_api
     ):
-        """navigate(dest=wp4) → path에 wp4 없음, path[-1]=wp3."""
+        """navigate(dest=wp4) → wp4(station)과 wp3(pickDrop) 모두 제거."""
         dest = MagicMock()
         dest.name = 'wp4'
         dest.final_name = 'wp4'
@@ -3609,7 +3677,8 @@ class TestPickDropStationRemoval:
         node_ids = [n.node_id for n in nodes]
 
         assert 'wp4' not in node_ids
-        assert node_ids[-1] == 'wp3'
+        assert 'wp3' not in node_ids
+        assert node_ids[-1] == 'wp2'
 
     def test_station_removal_pick_drop_dest(
         self, station_adapter, mock_api
@@ -3641,10 +3710,10 @@ class TestPickDropStationRemoval:
 
         assert station_adapter._pick_drop.station_node == 'wp4'
 
-    def test_station_removal_base_horizon(
+    def test_station_removal_all_base(
         self, station_adapter, mock_api
     ):
-        """wp3=horizon, 그 이전=base."""
+        """wp3,wp4 제거 후 남은 wp1,wp2는 모두 base."""
         dest = MagicMock()
         dest.name = 'wp4'
         dest.final_name = 'wp4'
@@ -3655,20 +3724,10 @@ class TestPickDropStationRemoval:
         station_adapter.cancel_cmd_attempt()
 
         nodes = mock_api.navigate.call_args[0][2]
-        node_ids = [n.node_id for n in nodes]
-
-        # path: [wp1, wp2, wp3], wp3=pickDrop dest → horizon
-        assert 'wp3' in node_ids
-        wp3_idx = node_ids.index('wp3')
-        for i, node in enumerate(nodes):
-            if i < wp3_idx:
-                assert node.released is True, (
-                    f'{node.node_id} should be base'
-                )
-            elif i == wp3_idx:
-                assert node.released is False, (
-                    f'{node.node_id} should be horizon'
-                )
+        for node in nodes:
+            assert node.released is True, (
+                f'{node.node_id} should be base'
+            )
 
     def test_station_removal_navigate_target(
         self, station_adapter, mock_api
@@ -3819,10 +3878,10 @@ class TestPickDropStationRemoval:
         assert station_adapter.execution is None
         assert station_adapter._nav.is_navigating is False
 
-    def test_direct_pickdrop_unaffected(
+    def test_direct_pickdrop_also_removes_dest(
         self, station_adapter, mock_api
     ):
-        """Dest 자체에 pickDrop 있는 기존 시나리오 동작 유지."""
+        """Dest 자체에 pickDrop 있는 시나리오도 dest를 path에서 제거."""
         station_adapter.position = [0.0, 0.0, 0.0]
 
         # wp3 자체가 pickDrop
@@ -3835,7 +3894,7 @@ class TestPickDropStationRemoval:
         station_adapter.navigate(dest, MagicMock())
         station_adapter.cancel_cmd_attempt()
 
-        # dest(wp3)에 pickDrop → 기존 시나리오
+        # dest(wp3)에 pickDrop
         assert station_adapter._pick_drop.destination == 'wp3'
         # station node removal은 발생하지 않음
         assert station_adapter._pick_drop.station_node is None
@@ -3843,8 +3902,9 @@ class TestPickDropStationRemoval:
         nodes = mock_api.navigate.call_args[0][2]
         node_ids = [n.node_id for n in nodes]
 
-        # wp3은 path에 존재 (제거되지 않음)
-        assert 'wp3' in node_ids
-        # wp1=base, wp2=base, wp3=horizon (기존 pickDrop 동작)
-        wp3_idx = node_ids.index('wp3')
-        assert nodes[wp3_idx].released is False
+        # wp3은 path에서 제거됨
+        assert 'wp3' not in node_ids
+        # wp1, wp2만 남고 모두 base
+        assert node_ids == ['wp1', 'wp2']
+        for node in nodes:
+            assert node.released is True

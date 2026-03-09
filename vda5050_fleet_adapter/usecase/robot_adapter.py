@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 import logging
 import math
 import threading
+import time
 from typing import Any
 import uuid
 
@@ -53,6 +54,7 @@ class OrderState:
     last_stitch_seq_id: int = 0
     last_map: str | None = None
     last_nodes: list = field(default_factory=list)
+    completed_normally: bool = False
 
 
 @dataclass
@@ -114,6 +116,7 @@ class RobotAdapter:
         self.recharge_soc = recharge_soc
         self.turn_angle_threshold = turn_angle_threshold
         self.allowed_deviation_theta = allowed_deviation_theta
+        self.action_completion_delay: float = 0.0
 
         self.execution: Any | None = None
         self.update_handle: Any | None = None
@@ -133,6 +136,9 @@ class RobotAdapter:
 
         # Negotiation 상태 관리
         self._is_paused_for_negotiation: bool = False
+
+        # Action 완료 딜레이 추적
+        self._action_completed_at: float | None = None
 
         # Commission 상태 추적
         self._last_commission: Any | None = None
@@ -155,13 +161,38 @@ class RobotAdapter:
             if completed:
                 self.execution.finished()
                 self.execution = None
+                self._order.completed_normally = True
                 self._nav = NavigationState()
                 self._charging.is_active = False
                 self._charging.is_pending = False
                 self._charging.station_name = None
                 self._charging.action_id = None
-            elif not self._charging.is_active:
-                activity_identifier = self.execution.identifier
+            else:
+                # Task 취소 감지: execution이 남아있지만 task_id가 변경된 경우
+                if self._order.current_task_id is not None:
+                    current_task_id = self._get_current_task_id()
+                    task_cancelled = (
+                        current_task_id is None
+                        or current_task_id == ''
+                        or current_task_id != self._order.current_task_id
+                    )
+                    if task_cancelled:
+                        logger.info(
+                            'Task cancelled while executing: '
+                            'robot=%s, old_task=%s, new_task=%s',
+                            self.name,
+                            self._order.current_task_id,
+                            current_task_id,
+                        )
+                        self.execution = None
+                        self.cancel_cmd_attempt()
+                        self._reset_order_state()
+
+                if (
+                    self.execution is not None
+                    and not self._charging.is_active
+                ):
+                    activity_identifier = self.execution.identifier
 
         # Task 완료 감지: task_id가 변경되거나 비어있으면 order 리셋
         if self._order.active_order_id is not None and self.execution is None:
@@ -233,7 +264,33 @@ class RobotAdapter:
                 return True
             return False
 
-        return self.api.is_command_completed(self.name, self.cmd_id)
+        completed = self.api.is_command_completed(
+            self.name, self.cmd_id
+        )
+        if not completed:
+            self._action_completed_at = None
+            return False
+
+        if self.action_completion_delay <= 0.0:
+            self._action_completed_at = None
+            return True
+
+        now = time.monotonic()
+        if self._action_completed_at is None:
+            self._action_completed_at = now
+            logger.info(
+                'Action completed for robot %s, waiting %.1fs '
+                'before reporting',
+                self.name, self.action_completion_delay,
+            )
+            return False
+
+        elapsed = now - self._action_completed_at
+        if elapsed < self.action_completion_delay:
+            return False
+
+        self._action_completed_at = None
+        return True
 
     def _update_commission(self) -> None:
         """VDA5050 상태 기반으로 RMF commission을 업데이트한다."""
@@ -335,6 +392,32 @@ class RobotAdapter:
             destination: RMF destination (position, map 등).
             execution: RMF execution handle.
         """
+        # 이전 task의 미완료 order 정리 (cancel_task_request 후
+        # stop() 없이 바로 navigate가 호출되는 경우)
+        if (
+            not self._order.completed_normally
+            and self._order.current_task_id is not None
+        ):
+            current_task_id = self._get_current_task_id()
+            if (
+                current_task_id is None
+                or current_task_id == ''
+                or current_task_id != self._order.current_task_id
+            ):
+                self.cancel_cmd_attempt()
+                self.cmd_id += 1
+                logger.info(
+                    'Incomplete order detected on navigate, '
+                    'sending cancelOrder: robot=%s, '
+                    'old_task=%s, new_task=%s, cmd_id=%d',
+                    self.name,
+                    self._order.current_task_id,
+                    current_task_id,
+                    self.cmd_id,
+                )
+                self.api.stop(self.name, self.cmd_id)
+
+        self._order.completed_normally = False
         self.cmd_id += 1
         self.execution = execution
         self._nav.target_position = list(destination.position[:2])
@@ -388,6 +471,13 @@ class RobotAdapter:
         path, base_end_index = self._apply_path_modifiers(
             path, goal_node, target,
         )
+
+        # 도착 판정용 target_position을 base end node 좌표로 설정
+        base_end_name = path[base_end_index]
+        self._nav.target_position = [
+            self.nav_nodes[base_end_name]['x'],
+            self.nav_nodes[base_end_name]['y'],
+        ]
 
         # ── VDA5050 Node/Edge 생성 ──
         seq_start = (
@@ -652,14 +742,24 @@ class RobotAdapter:
             if pre_dest_attrs.get('pickDrop', False):
                 self._pick_drop.station_node = path[-1]
                 self._pick_drop.destination = pre_dest
-                path = path[:-1]
-                target = pre_dest
-                self._order.final_destination = pre_dest
+                if len(path) >= 3:
+                    # station + pickDrop 둘 다 제거,
+                    # final_dest를 pickDrop 전 노드로 설정
+                    path = path[:-2]
+                    target = path[-1]
+                    self._order.final_destination = path[-1]
+                else:
+                    # 로봇이 staging 근처: station만 제거
+                    path = path[:-1]
+                    target = pre_dest
+                    self._order.final_destination = pre_dest
                 logger.info(
-                    'Station node removal for %s: removed %s, '
-                    'pickDrop staging=%s',
+                    'Station node removal for %s: '
+                    'removed station=%s, staging=%s, '
+                    'final_dest=%s, path=%s',
                     self.name, self._pick_drop.station_node,
-                    pre_dest,
+                    pre_dest, self._order.final_destination,
+                    path,
                 )
 
         return path, target
@@ -716,26 +816,31 @@ class RobotAdapter:
         else:
             base_end_index = len(path) - 1
 
-        # ── pickDrop: dest를 horizon으로 유지, 직전 노드까지 base ──
+        # ── pickDrop: dest를 path에서 완전 제거, 직전 노드까지만 ──
+        # Phase 2(execute_action)에서 pickDrop dest가 action과 함께
+        # 처음 등장하도록 Phase 1에서는 제거한다.
         if (
             self._pick_drop.destination is not None
             and len(path) >= 2
-            and base_end_index >= 1
         ):
-            base_end_index -= 1
-            pre_pick_drop = path[base_end_index]
-            self._nav.target_position = [
-                self.nav_nodes[pre_pick_drop]['x'],
-                self.nav_nodes[pre_pick_drop]['y'],
-            ]
-            logger.info(
-                'pickDrop: base_end adjusted for robot %s, '
-                'pre_dest=%s, pick_drop_dest=%s, '
-                'base_end_index=%d',
-                self.name, pre_pick_drop,
-                self._pick_drop.destination,
-                base_end_index,
-            )
+            pick_drop_idx = None
+            for i, node in enumerate(path):
+                if node == self._pick_drop.destination:
+                    pick_drop_idx = i
+                    break
+            if pick_drop_idx is not None and pick_drop_idx >= 1:
+                path = path[:pick_drop_idx]
+                pre_pick_drop = path[-1]
+                base_end_index = len(path) - 1
+                if rmf_path_end >= len(path):
+                    rmf_path_end = len(path) - 1
+                logger.info(
+                    'pickDrop: removed dest from path for robot %s, '
+                    'pre_dest=%s, pick_drop_dest=%s, '
+                    'path=%s',
+                    self.name, pre_pick_drop,
+                    self._pick_drop.destination, path,
+                )
 
         # ── Charging: charger 노드를 경로에서 항상 제거 ──
         _final_is_charger = (
@@ -754,11 +859,6 @@ class RobotAdapter:
                 rmf_path_end = len(path) - 1
             if self._charging.is_pending:
                 # dest가 charger: pre-charger 도착 타겟, 전체 base
-                pre_charger = path[-1]
-                self._nav.target_position = [
-                    self.nav_nodes[pre_charger]['x'],
-                    self.nav_nodes[pre_charger]['y'],
-                ]
                 base_end_index = len(path) - 1
             logger.info(
                 'Charging: removed charger node for robot %s, '
@@ -975,6 +1075,7 @@ class RobotAdapter:
             description: 액션 설명 dict.
             execution: RMF execution handle.
         """
+        self._order.completed_normally = False
         self.cmd_id += 1
         self.execution = execution
         self._nav.is_navigating = False
@@ -1386,11 +1487,19 @@ class RobotAdapter:
         self._pick_drop.destination = None
         self._pick_drop.station_node = None
 
-        if self._order.active_order_id is not None:
+        if self._order.current_task_id is None:
+            pass  # task가 없었으므로 cancelOrder 불필요
+        elif self._order.completed_normally:
+            logger.info(
+                'Task completed normally, skipping cancelOrder '
+                'for robot %s, order_id=%s',
+                self.name, self._order.active_order_id,
+            )
+        else:
             self.cmd_id += 1
             logger.info(
-                'Task ended, sending cancelOrder for robot %s, '
-                'order_id=%s, cmd_id=%d',
+                'Task ended abnormally, sending cancelOrder '
+                'for robot %s, order_id=%s, cmd_id=%d',
                 self.name, self._order.active_order_id,
                 self.cmd_id,
             )

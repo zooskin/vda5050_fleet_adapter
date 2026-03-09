@@ -217,6 +217,9 @@ def main(argv: list[str] | None = None) -> None:
             'allowed_deviation_theta', 15.0
         )
     )
+    action_completion_delay = config_yaml.get('rmf_fleet', {}).get(
+        'action_completion_delay', 0.0
+    )
     node.get_logger().info(f'known_robots: {fleet_config.known_robots}')
     robots: dict[str, RobotAdapter] = {}
     for robot_name in fleet_config.known_robots:
@@ -242,6 +245,7 @@ def main(argv: list[str] | None = None) -> None:
             turn_angle_threshold=turn_angle_threshold,
             allowed_deviation_theta=allowed_deviation_theta,
         )
+        robot.action_completion_delay = action_completion_delay
         robot.configuration = robot_config
         robots[robot_name] = robot
 
