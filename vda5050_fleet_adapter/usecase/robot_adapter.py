@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 import logging
 import math
 import threading
+import time
 from typing import Any
 import uuid
 
@@ -114,6 +115,7 @@ class RobotAdapter:
         self.recharge_soc = recharge_soc
         self.turn_angle_threshold = turn_angle_threshold
         self.allowed_deviation_theta = allowed_deviation_theta
+        self.action_completion_delay: float = 0.0
 
         self.execution: Any | None = None
         self.update_handle: Any | None = None
@@ -133,6 +135,9 @@ class RobotAdapter:
 
         # Negotiation 상태 관리
         self._is_paused_for_negotiation: bool = False
+
+        # Action 완료 딜레이 추적
+        self._action_completed_at: float | None = None
 
         # Commission 상태 추적
         self._last_commission: Any | None = None
@@ -233,7 +238,33 @@ class RobotAdapter:
                 return True
             return False
 
-        return self.api.is_command_completed(self.name, self.cmd_id)
+        completed = self.api.is_command_completed(
+            self.name, self.cmd_id
+        )
+        if not completed:
+            self._action_completed_at = None
+            return False
+
+        if self.action_completion_delay <= 0.0:
+            self._action_completed_at = None
+            return True
+
+        now = time.monotonic()
+        if self._action_completed_at is None:
+            self._action_completed_at = now
+            logger.info(
+                'Action completed for robot %s, waiting %.1fs '
+                'before reporting',
+                self.name, self.action_completion_delay,
+            )
+            return False
+
+        elapsed = now - self._action_completed_at
+        if elapsed < self.action_completion_delay:
+            return False
+
+        self._action_completed_at = None
+        return True
 
     def _update_commission(self) -> None:
         """VDA5050 상태 기반으로 RMF commission을 업데이트한다."""
