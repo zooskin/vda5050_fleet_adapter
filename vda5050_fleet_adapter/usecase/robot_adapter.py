@@ -392,6 +392,32 @@ class RobotAdapter:
             destination: RMF destination (position, map 등).
             execution: RMF execution handle.
         """
+        # 이전 task의 미완료 order 정리 (cancel_task_request 후
+        # stop() 없이 바로 navigate가 호출되는 경우)
+        if (
+            not self._order.completed_normally
+            and self._order.current_task_id is not None
+        ):
+            current_task_id = self._get_current_task_id()
+            if (
+                current_task_id is None
+                or current_task_id == ''
+                or current_task_id != self._order.current_task_id
+            ):
+                self.cancel_cmd_attempt()
+                self.cmd_id += 1
+                logger.info(
+                    'Incomplete order detected on navigate, '
+                    'sending cancelOrder: robot=%s, '
+                    'old_task=%s, new_task=%s, cmd_id=%d',
+                    self.name,
+                    self._order.current_task_id,
+                    current_task_id,
+                    self.cmd_id,
+                )
+                self.api.stop(self.name, self.cmd_id)
+
+        self._order.completed_normally = False
         self.cmd_id += 1
         self.execution = execution
         self._nav.target_position = list(destination.position[:2])
@@ -1049,6 +1075,7 @@ class RobotAdapter:
             description: 액션 설명 dict.
             execution: RMF execution handle.
         """
+        self._order.completed_normally = False
         self.cmd_id += 1
         self.execution = execution
         self._nav.is_navigating = False
