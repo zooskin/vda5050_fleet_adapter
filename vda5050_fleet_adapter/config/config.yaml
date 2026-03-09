@@ -42,6 +42,7 @@ rmf_fleet:
   arrival_threshold: 0.5            # meters, distance-based arrival detection
   turn_angle_threshold: 15.0       # degrees, min turn angle to require theta check
   allowed_deviation_theta: 15.0    # degrees, theta tolerance for arrival
+  action_completion_delay: 0.5     # seconds, delay after reaching goal before marking action complete
 
 # MQTT / VDA5050 CONFIG ========================================================
 fleet_manager:

@@ -220,10 +220,10 @@ levels:
       - {is_parking_spot: false, name: presupplies}
     - - 10.247854072726847
       - -3.09205587858002
-      - {name: patrol_D2}
+      - {name: patrol_D2, pickDrop: true}
     - - 16.85582469463477
       - -6.881363780090288
-      - {name: patrol_D1}
+      - {name: patrol_D1, pickDrop: true}
     - - 18.7395242949738
       - -6.873981868527042
       - {is_parking_spot: false, name: ''}

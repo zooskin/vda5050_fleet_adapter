@@ -276,6 +276,7 @@ class TestIsCommandCompleted:
         state.node_states = []
         state.driving = False
         state.action_states = []
+        state.has_fatal_error = False
         api._state_cache['AGV-001'] = state
 
         assert api.is_command_completed('AGV-001', 1)
@@ -290,6 +291,7 @@ class TestIsCommandCompleted:
         state.node_states = []
         state.driving = True
         state.action_states = []
+        state.has_fatal_error = False
         api._state_cache['AGV-001'] = state
 
         assert not api.is_command_completed('AGV-001', 1)
@@ -306,6 +308,7 @@ class TestIsCommandCompleted:
         state.node_states = [released_node]
         state.driving = False
         state.action_states = []
+        state.has_fatal_error = False
         api._state_cache['AGV-001'] = state
 
         assert not api.is_command_completed('AGV-001', 1)
@@ -324,6 +327,7 @@ class TestIsCommandCompleted:
         state.node_states = [horizon_node1, horizon_node2]
         state.driving = False
         state.action_states = []
+        state.has_fatal_error = False
         api._state_cache['AGV-001'] = state
 
         assert api.is_command_completed('AGV-001', 1)
@@ -342,12 +346,13 @@ class TestIsCommandCompleted:
         state.node_states = []
         state.driving = False
         state.action_states = [action_state]
+        state.has_fatal_error = False
         api._state_cache['AGV-001'] = state
 
         assert api.is_command_completed('AGV-001', 1)
 
-    def test_action_completed_when_failed(self, api):
-        """Action status가 FAILED이면 완료."""
+    def test_action_not_completed_when_failed(self, api):
+        """Action status가 FAILED이면 완료 처리하지 않고 대기."""
         action_id = 'charge_1_abc'
         api._cmd_order_map['AGV-001'] = {1: action_id}
 
@@ -360,9 +365,59 @@ class TestIsCommandCompleted:
         state.node_states = []
         state.driving = False
         state.action_states = [action_state]
+        state.has_fatal_error = False
+        api._state_cache['AGV-001'] = state
+
+        assert not api.is_command_completed('AGV-001', 1)
+
+    def test_order_not_completed_when_fatal_error(self, api):
+        """FATAL 에러가 있으면 order 완료 처리하지 않고 대기."""
+        order_id = 'order_1_abc'
+        api._cmd_order_map['AGV-001'] = {1: order_id}
+
+        state = MagicMock()
+        state.order_id = order_id
+        state.node_states = []
+        state.driving = False
+        state.action_states = []
+        state.has_fatal_error = True
+        api._state_cache['AGV-001'] = state
+
+        assert not api.is_command_completed('AGV-001', 1)
+
+    def test_order_completed_when_warning_only(self, api):
+        """WARNING만 있으면 order 완료 처리 허용."""
+        order_id = 'order_1_abc'
+        api._cmd_order_map['AGV-001'] = {1: order_id}
+
+        state = MagicMock()
+        state.order_id = order_id
+        state.node_states = []
+        state.driving = False
+        state.action_states = []
+        state.has_fatal_error = False
         api._state_cache['AGV-001'] = state
 
         assert api.is_command_completed('AGV-001', 1)
+
+    def test_action_not_completed_when_fatal_error(self, api):
+        """FATAL 에러가 있으면 action FINISHED여도 완료 처리하지 않고 대기."""
+        action_id = 'pick_1_abc'
+        api._cmd_order_map['AGV-001'] = {1: action_id}
+
+        action_state = MagicMock()
+        action_state.action_id = action_id
+        action_state.action_status = ActionStatus.FINISHED
+
+        state = MagicMock()
+        state.order_id = ''
+        state.node_states = []
+        state.driving = False
+        state.action_states = [action_state]
+        state.has_fatal_error = True
+        api._state_cache['AGV-001'] = state
+
+        assert not api.is_command_completed('AGV-001', 1)
 
 
 class TestOnStateMessage:
