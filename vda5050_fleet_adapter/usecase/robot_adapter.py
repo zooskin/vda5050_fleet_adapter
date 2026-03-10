@@ -144,6 +144,9 @@ class RobotAdapter:
         # Commission 상태 추적
         self._last_commission: Any | None = None
 
+        # 로봇 연결 상태 추적 (reconnection 감지용)
+        self._was_connected: bool = True
+
     def update(self, state: Any, data: RobotUpdateData) -> None:
         """주기적 상태 업데이트.
 
@@ -155,6 +158,13 @@ class RobotAdapter:
             data: 로봇 상태 데이터.
         """
         self.position = data.position
+
+        # Reconnection 감지: 로봇이 재연결되면 stale 충전 상태 리셋
+        robot_connected = self.api.is_robot_connected(self.name)
+        if not self._was_connected and robot_connected:
+            self._on_reconnect()
+        self._was_connected = robot_connected
+
         activity_identifier = None
 
         if self.execution is not None:
@@ -363,6 +373,25 @@ class RobotAdapter:
             'Charging decommission [%s]: SOC %.2f < %.2f',
             self.name, battery_soc, self.recharge_soc,
         )
+
+    def _on_reconnect(self) -> None:
+        """로봇 reconnection 시 stale 상태를 리셋한다.
+
+        충전 중 로봇이 종료 후 다른 위치에서 재시작될 경우,
+        was_charging/is_decommissioned 등 이전 충전 상태가 남아있으면
+        다음 order에 불필요한 stopCharging이 붙거나 decommission이
+        유지되는 문제를 방지한다.
+        """
+        logger.info(
+            'Robot reconnected [%s]: resetting stale charging state '
+            '(was_charging=%s, is_decommissioned=%s, is_active=%s)',
+            self.name,
+            self._charging.was_charging,
+            self._charging.is_decommissioned,
+            self._charging.is_active,
+        )
+        self._charging = ChargingState()
+        self._last_commission = None
 
     def make_callbacks(self) -> Any:
         """RMF RobotCallbacks를 생성한다.

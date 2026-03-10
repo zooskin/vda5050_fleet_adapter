@@ -3364,6 +3364,154 @@ class TestChargingDecommission:
         assert charging_adapter._charging.is_decommissioned is True
 
 
+class TestReconnection:
+    """로봇 reconnection 시 stale 충전 상태 리셋 테스트.
+
+    시나리오: 로봇이 충전 중 종료 후 다른 위치에서 재시작.
+    어댑터의 was_charging/is_decommissioned 등이 리셋되어야 한다.
+    """
+
+    @pytest.fixture
+    def charging_adapter(self, mock_api, mock_node):
+        """Charger 노드가 포함된 어댑터."""
+        from vda5050_fleet_adapter.infra.nav_graph.graph_utils import (
+            create_graph,
+        )
+        nodes = {
+            'wp1': {'x': 0.0, 'y': 0.0, 'attributes': {}},
+            'wp2': {'x': 5.0, 'y': 0.0, 'attributes': {}},
+            'wp3': {'x': 5.0, 'y': 5.0, 'attributes': {}},
+            'charger_1': {
+                'x': 5.0, 'y': 10.0,
+                'attributes': {'is_charger': True},
+            },
+        }
+        edges = {
+            'e0': {'start': 'wp1', 'end': 'wp2', 'attributes': {}},
+            'e1': {'start': 'wp2', 'end': 'wp1', 'attributes': {}},
+            'e2': {'start': 'wp2', 'end': 'wp3', 'attributes': {}},
+            'e3': {'start': 'wp3', 'end': 'wp2', 'attributes': {}},
+            'e4': {
+                'start': 'wp3', 'end': 'charger_1',
+                'attributes': {},
+            },
+            'e5': {
+                'start': 'charger_1', 'end': 'wp3',
+                'attributes': {},
+            },
+        }
+        graph = create_graph(nodes, edges)
+        robot = RobotAdapter(
+            name='AGV-001', api=mock_api, node=mock_node,
+            fleet_handle=MagicMock(),
+            nav_nodes=nodes, nav_edges=edges, nav_graph=graph,
+        )
+        robot.configuration = MagicMock()
+        mock_handle = MagicMock()
+        mock_handle.more.return_value.current_task_id \
+            .return_value = 'task-001'
+        robot.update_handle = mock_handle
+        robot.position = [0.0, 0.0, 0.0]
+        return robot
+
+    def test_reconnect_resets_was_charging(
+        self, charging_adapter, mock_api
+    ):
+        """로봇 reconnection 시 was_charging이 리셋된다."""
+        # 충전 완료 상태 시뮬레이션
+        charging_adapter._charging.was_charging = True
+        charging_adapter._charging.is_decommissioned = True
+
+        # 로봇 disconnect → reconnect 시뮬레이션
+        charging_adapter._was_connected = False
+        mock_api.is_robot_connected.return_value = True
+
+        state = MagicMock()
+        data = RobotUpdateData(
+            robot_name='AGV-001', map_name='map1',
+            position=[0.0, 0.0, 0.0], battery_soc=0.5,
+        )
+        charging_adapter.update(state, data)
+
+        assert charging_adapter._charging.was_charging is False
+        assert charging_adapter._charging.is_decommissioned is False
+
+    def test_reconnect_no_stop_charging_on_next_navigate(
+        self, charging_adapter, mock_api
+    ):
+        """Reconnection 후 navigate에 stopCharging이 붙지 않는다."""
+        # 충전 완료 상태 시뮬레이션
+        charging_adapter._charging.was_charging = True
+        charging_adapter._charging.is_decommissioned = True
+
+        # disconnect → reconnect
+        charging_adapter._was_connected = False
+        mock_api.is_robot_connected.return_value = True
+
+        state = MagicMock()
+        data = RobotUpdateData(
+            robot_name='AGV-001', map_name='map1',
+            position=[0.0, 0.0, 0.0], battery_soc=0.5,
+        )
+        charging_adapter.update(state, data)
+
+        # 다른 위치에서 navigate
+        charging_adapter.position = [0.0, 0.0, 0.0]
+        dest = MagicMock()
+        dest.name = 'wp2'
+        dest.final_name = 'wp2'
+        dest.position = [5.0, 0.0, 0.0]
+        dest.map = 'map1'
+        dest.waypoint_names = None
+
+        charging_adapter.navigate(dest, MagicMock())
+        charging_adapter.cancel_cmd_attempt()
+
+        nodes = mock_api.navigate.call_args[0][2]
+        has_stop_charging = any(
+            a.action_type == 'stopCharging'
+            for n in nodes for a in n.actions
+        )
+        assert not has_stop_charging
+
+    def test_no_reset_when_still_connected(
+        self, charging_adapter, mock_api
+    ):
+        """연결이 유지 중이면 charging 상태를 리셋하지 않는다."""
+        charging_adapter._charging.was_charging = True
+        charging_adapter._was_connected = True
+        mock_api.is_robot_connected.return_value = True
+
+        state = MagicMock()
+        data = RobotUpdateData(
+            robot_name='AGV-001', map_name='map1',
+            position=[0.0, 0.0, 0.0], battery_soc=0.5,
+        )
+        charging_adapter.update(state, data)
+
+        # 연결이 끊어진 적 없으므로 리셋되지 않음
+        assert charging_adapter._charging.was_charging is True
+
+    def test_no_reset_while_disconnected(
+        self, charging_adapter, mock_api
+    ):
+        """연결이 끊어진 상태에서는 리셋되지 않는다."""
+        charging_adapter._charging.was_charging = True
+        charging_adapter._was_connected = True
+        mock_api.is_robot_connected.return_value = False
+
+        state = MagicMock()
+        data = RobotUpdateData(
+            robot_name='AGV-001', map_name='map1',
+            position=[0.0, 0.0, 0.0], battery_soc=0.5,
+        )
+        charging_adapter.update(state, data)
+
+        # 아직 reconnect되지 않았으므로 리셋되지 않음
+        assert charging_adapter._charging.was_charging is True
+        assert charging_adapter._was_connected is False
+
+
 class TestPickDropFlow:
     """pickDrop Base/Horizon 분리 테스트.
 
