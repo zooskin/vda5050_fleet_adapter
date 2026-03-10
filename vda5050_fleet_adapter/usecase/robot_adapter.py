@@ -872,16 +872,24 @@ class RobotAdapter:
                     self._pick_drop.destination, path,
                 )
 
-        # ── Charging: charger 노드를 경로에서 항상 제거 ──
+        # ── Charging: charger 노드를 경로에서 제거 ──
+        # pre-charger(charger 직전 노드)가 charger와 인접해야만 제거.
+        # 인접하지 않으면 경로가 불완전한 것이므로 제거하지 않는다.
         _final_is_charger = (
             self._order.final_destination is not None
             and self.nav_nodes.get(
                 self._order.final_destination, {}
             ).get('attributes', {}).get('is_charger', False)
         )
+        _pre_charger_adjacent = (
+            len(path) >= 2
+            and self.nav_graph.has_edge(
+                path[-2], self._order.final_destination
+            )
+        )
         if (
             _final_is_charger
-            and len(path) >= 2
+            and _pre_charger_adjacent
             and path[-1] == self._order.final_destination
         ):
             path = path[:-1]
@@ -896,6 +904,15 @@ class RobotAdapter:
                 'Charging: removed charger node for robot %s, '
                 'pre_charger=%s, station=%s, path=%s',
                 self.name, path[-1],
+                self._order.final_destination, path,
+            )
+        elif _final_is_charger and not _pre_charger_adjacent:
+            logger.warning(
+                'Charging: skipped charger removal for robot %s, '
+                'path[-2]=%s is not adjacent to charger=%s, '
+                'path=%s',
+                self.name,
+                path[-2] if len(path) >= 2 else 'N/A',
                 self._order.final_destination, path,
             )
 

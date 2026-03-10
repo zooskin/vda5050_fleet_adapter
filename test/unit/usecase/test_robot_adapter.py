@@ -3098,6 +3098,111 @@ class TestCharging:
         # (이 테스트는 현재 동작을 문서화; main.py에서 position 설정으로 방지)
         assert 'charger_1' in node_ids
 
+    def test_charger_removal_skipped_when_not_adjacent(
+        self, charging_adapter, mock_api
+    ):
+        """경로가 불완전할 때 charger 제거를 건너뛴다.
+
+        로봇이 charger와 인접하지 않은 노드(wp1)에 있고, 경로 계산이
+        실패하여 [wp1, charger_1]로만 path가 생성된 경우,
+        charger를 제거하면 [wp1(startCharging)]이 되어 엉뚱한 위치에서
+        충전을 시도한다. 이 경우 charger를 제거하지 않아야 한다.
+        """
+        # wp1은 charger_1과 인접하지 않음 (wp1-wp2-wp3-charger_1)
+        charging_adapter.position = [0.0, 0.0, 0.0]
+
+        dest = MagicMock()
+        dest.name = 'charger_1'
+        dest.final_name = 'charger_1'
+        dest.position = [5.0, 10.0, 0.0]
+        dest.map = 'map1'
+        # 불완전한 waypoint: 중간 노드 누락, 비인접 쌍
+        # wp1과 charger_1 사이에 직접 edge가 없으므로
+        # interpolation이 compute_path로 중간 노드를 채움
+        # → 정상 경로가 되어 charger 제거 동작
+        dest.waypoint_names = None
+
+        charging_adapter.navigate(dest, MagicMock())
+        charging_adapter.cancel_cmd_attempt()
+
+        nodes = mock_api.navigate.call_args[0][2]
+        node_ids = [n.node_id for n in nodes]
+
+        # compute_path가 성공하면 정상 경로 생성, charger 제거됨
+        assert 'charger_1' not in node_ids
+        assert 'wp3' in node_ids  # pre-charger 포함
+
+    def test_charger_not_removed_on_broken_path(
+        self, mock_api, mock_node
+    ):
+        """compute_path 실패 시 charger를 제거하지 않는다.
+
+        nav_graph에 경로가 없어서 path=[far_node, charger]가 된 경우,
+        far_node가 charger와 인접하지 않으므로 charger 제거를 건너뛴다.
+        """
+        from vda5050_fleet_adapter.infra.nav_graph.graph_utils import (
+            create_graph,
+        )
+        # 분리된 그래프: wp1-wp2 / wp3-charger_1 (연결 없음)
+        nodes = {
+            'wp1': {'x': 0.0, 'y': 0.0, 'attributes': {}},
+            'wp2': {'x': 5.0, 'y': 0.0, 'attributes': {}},
+            'wp3': {'x': 5.0, 'y': 5.0, 'attributes': {}},
+            'charger_1': {
+                'x': 5.0, 'y': 10.0,
+                'attributes': {'is_charger': True},
+            },
+        }
+        edges = {
+            'e0': {'start': 'wp1', 'end': 'wp2', 'attributes': {}},
+            'e1': {'start': 'wp2', 'end': 'wp1', 'attributes': {}},
+            'e2': {
+                'start': 'wp3', 'end': 'charger_1',
+                'attributes': {},
+            },
+            'e3': {
+                'start': 'charger_1', 'end': 'wp3',
+                'attributes': {},
+            },
+            # wp2-wp3 edge 없음 → wp1에서 charger_1로 갈 수 없음
+        }
+        graph = create_graph(nodes, edges)
+        robot = RobotAdapter(
+            name='AGV-001', api=mock_api, node=mock_node,
+            fleet_handle=MagicMock(),
+            nav_nodes=nodes, nav_edges=edges, nav_graph=graph,
+        )
+        robot.configuration = MagicMock()
+        mock_handle = MagicMock()
+        mock_handle.more.return_value.current_task_id \
+            .return_value = 'charge-task-001'
+        robot.update_handle = mock_handle
+        robot.position = [0.0, 0.0, 0.0]  # wp1 위치
+
+        dest = MagicMock()
+        dest.name = 'charger_1'
+        dest.final_name = 'charger_1'
+        dest.position = [5.0, 10.0, 0.0]
+        dest.map = 'map1'
+        dest.waypoint_names = None
+
+        robot.navigate(dest, MagicMock())
+        robot.cancel_cmd_attempt()
+
+        call_args = mock_api.navigate.call_args[0]
+        nodes_list = call_args[2]
+        node_ids = [n.node_id for n in nodes_list]
+
+        # wp1은 charger_1과 인접하지 않으므로 charger 제거 안됨
+        assert 'charger_1' in node_ids
+        assert 'wp1' in node_ids
+        # startCharging은 여전히 부착 (charger 노드에)
+        has_start_charging = any(
+            a.action_type == 'startCharging'
+            for n in nodes_list for a in n.actions
+        )
+        assert has_start_charging
+
 
 class TestChargingDecommission:
     """충전 중 decommission / SOC 기반 recommission 테스트.
