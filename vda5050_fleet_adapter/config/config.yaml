@@ -23,16 +23,17 @@ rmf_fleet:
     power: 20.0                # watts
   tool_system:
     power: 0.0                 # watts
-  recharge_threshold: 0.40     # 40% 이하 시 자동 충전 task 발생
-  recharge_soc: 0.8
+  recharge_threshold: 0.40     # 40% 이하 시 새 task 중단, 자동 충전 배정
+  recharge_soc: 0.8            # 자동 충전 시 80%까지 충전 후 완료
   publish_fleet_state: 10.0
-  account_for_battery_drain: True
+  account_for_battery_drain: False
   task_capabilities:
     loop: True
     delivery: True
     clean: False
   actions: ["teleop", "pick", "drop"]
   finishing_request: "park"
+  use_parking_reservations: true
   robots:
     AGV_001:
       charger: "tinyRobot1_charger"
@@ -43,6 +44,9 @@ rmf_fleet:
   turn_angle_threshold: 15.0       # degrees, min turn angle to require theta check
   allowed_deviation_theta: 15.0    # degrees, theta tolerance for arrival
   action_completion_delay: 0.5     # seconds, delay after reaching goal before marking action complete
+  action_durations:                # seconds, override_schedule hold time per action category
+    pick: 30.0
+    drop: 15.0
 
 # MQTT / VDA5050 CONFIG ========================================================
 fleet_manager:
