@@ -117,6 +117,7 @@ class RobotAdapter:
         self.turn_angle_threshold = turn_angle_threshold
         self.allowed_deviation_theta = allowed_deviation_theta
         self.action_completion_delay: float = 0.0
+        self.action_durations: dict[str, float] = {}
 
         self.execution: Any | None = None
         self.update_handle: Any | None = None
@@ -1169,6 +1170,8 @@ class RobotAdapter:
             0,
         )
 
+        self._apply_schedule_override(category, [current_node])
+
         self.attempt_cmd_until_success(
             cmd=lambda *a: self.api.navigate(
                 *a, track_action_id=action_id
@@ -1291,6 +1294,8 @@ class RobotAdapter:
             current_node, path,
         )
 
+        self._apply_schedule_override(category, path)
+
         nav_args = (
             self.name,
             self.cmd_id,
@@ -1377,6 +1382,8 @@ class RobotAdapter:
             update_id,
         )
 
+        self._apply_schedule_override(category, path)
+
         self.attempt_cmd_until_success(
             cmd=lambda *a: self.api.navigate(
                 *a, track_action_id=action_id
@@ -1390,6 +1397,52 @@ class RobotAdapter:
         self._order.last_stitch_seq_id = 0
         self._pick_drop.destination = None
         self._pick_drop.station_node = None
+
+    def _apply_schedule_override(
+        self, category: str, path: list[str],
+    ) -> None:
+        """Register action path and hold time in RMF traffic schedule.
+
+        config의 action_durations에 해당 category의 duration이 설정된 경우에만
+        override_schedule을 호출한다.
+
+        Args:
+            category: 액션 카테고리 (pick, drop 등).
+            path: 이동 경로 노드 이름 리스트.
+        """
+        hold_sec = self.action_durations.get(category, 0.0)
+        if hold_sec <= 0.0:
+            return
+
+        if self.execution is None:
+            return
+
+        map_name = self._order.last_map or 'map1'
+        path_coords = []
+        for node_name in path:
+            node_data = self.nav_nodes.get(node_name)
+            if node_data is None:
+                continue
+            path_coords.append([
+                node_data['x'], node_data['y'], 0.0,
+            ])
+
+        if not path_coords:
+            return
+
+        try:
+            self.execution.override_schedule(
+                map_name, path_coords, hold_sec,
+            )
+            logger.info(
+                'override_schedule [%s]: category=%s, '
+                'hold=%.1fs, path_len=%d',
+                self.name, category, hold_sec, len(path_coords),
+            )
+        except Exception as e:
+            logger.warning(
+                'override_schedule failed [%s]: %s', self.name, e,
+            )
 
     def attempt_cmd_until_success(
         self, cmd: Any, args: tuple
