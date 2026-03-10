@@ -3358,7 +3358,7 @@ class TestPickDropFlow:
     def test_pickdrop_navigate_removes_dest_from_path(
         self, pick_drop_adapter, mock_api
     ):
-        """PickDrop dest is removed from path, only pre-dest nodes remain."""
+        """Verify pickDrop dest is removed from path."""
         dest = MagicMock()
         dest.name = 'wp2'
         dest.final_name = 'wp2'
