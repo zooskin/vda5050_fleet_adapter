@@ -858,6 +858,8 @@ class RobotAdapter:
             path = path[:-1]
             if rmf_path_end >= len(path):
                 rmf_path_end = len(path) - 1
+            if base_end_index >= len(path):
+                base_end_index = len(path) - 1
             if self._charging.is_pending:
                 # dest가 charger: pre-charger 도착 타겟, 전체 base
                 base_end_index = len(path) - 1
