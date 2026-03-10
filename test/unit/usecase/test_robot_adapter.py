@@ -3034,6 +3034,70 @@ class TestCharging:
                     f'{n.node_id} should be horizon'
                 )
 
+    def test_charging_at_pre_charger_excludes_charger_node(
+        self, charging_adapter, mock_api
+    ):
+        """로봇이 pre-charger 노드에 있을 때 charger 노드가 제외된다.
+
+        로봇이 처음 charging node 앞 node(wp3)에서 연결되었을 때,
+        charger 노드(charger_1)까지 가지 않고 wp3에서만 startCharging.
+        """
+        # 로봇이 wp3 (pre-charger) 위치에 있음
+        charging_adapter.position = [5.0, 5.0, 0.0]
+
+        dest = MagicMock()
+        dest.name = 'charger_1'
+        dest.final_name = 'charger_1'
+        dest.position = [5.0, 10.0, 0.0]
+        dest.map = 'map1'
+        dest.waypoint_names = None
+
+        charging_adapter.navigate(dest, MagicMock())
+        charging_adapter.cancel_cmd_attempt()
+
+        call_args = mock_api.navigate.call_args[0]
+        nodes = call_args[2]
+        node_ids = [n.node_id for n in nodes]
+
+        # charger 노드 미포함, wp3만 포함
+        assert 'charger_1' not in node_ids
+        assert node_ids == ['wp3']
+        # startCharging action 부착
+        assert any(
+            a.action_type == 'startCharging'
+            for a in nodes[0].actions
+        )
+
+    def test_charging_position_none_fallback(
+        self, charging_adapter, mock_api
+    ):
+        """position이 None일 때 start_node가 goal_node로 fallback.
+
+        position이 None이면 charger 노드만 포함된 단일 노드 경로가
+        생성되어 charger 제거가 불가능했던 버그 재현.
+        """
+        # position 미설정 (처음 연결 시 update 전)
+        charging_adapter.position = None
+
+        dest = MagicMock()
+        dest.name = 'charger_1'
+        dest.final_name = 'charger_1'
+        dest.position = [5.0, 10.0, 0.0]
+        dest.map = 'map1'
+        dest.waypoint_names = None
+
+        charging_adapter.navigate(dest, MagicMock())
+        charging_adapter.cancel_cmd_attempt()
+
+        call_args = mock_api.navigate.call_args[0]
+        nodes = call_args[2]
+        node_ids = [n.node_id for n in nodes]
+
+        # position None → start_node=charger_1, path=[charger_1]
+        # len(path) < 2이므로 charger 제거 불가 → charger_1 포함
+        # (이 테스트는 현재 동작을 문서화; main.py에서 position 설정으로 방지)
+        assert 'charger_1' in node_ids
+
 
 class TestChargingDecommission:
     """충전 중 decommission / SOC 기반 recommission 테스트.
