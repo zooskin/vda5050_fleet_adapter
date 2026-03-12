@@ -239,7 +239,7 @@ levels:
       - {name: ''}
     - - 10.086146188918223
       - -6.979436538645566
-      - {name: patrol_A1}
+      - {is_parking_spot: true, name: patrol_A1}
     - - 7.914645158056635
       - -7.918869440017712
       - {is_parking_spot: false, name: ''}
@@ -260,13 +260,13 @@ levels:
       - {is_parking_spot: true, name: supplies, allowedDeviationXY: 0.2}
     - - 18.949764861112804
       - -4.039082328888211
-      - {name: patrol_A2}
+      - {is_parking_spot: true, name: patrol_A2}
     - - 20.64214427644111
       - -3.9893052188057747
       - {is_holding_point: true, is_parking_spot: false, name: lounge}
     - - 10.433053704916215
       - -5.5750955876973505
-      - {is_charger: true, is_holding_point: true, is_parking_spot: true, name: tinyRobot1_charger,
+      - {is_charger: true, is_holding_point: true, is_parking_spot: false, name: tinyRobot1_charger,
         spawn_robot_name: tinyRobot1, spawn_robot_type: Open-RMF/TinyRobot,
         allowedDeviationXY: 0.3}
     - - 11.565889303047436
@@ -306,7 +306,7 @@ levels:
         name: hardware_2}
     - - 20.423692180237488
       - -5.312098057266895
-      - {is_charger: true, is_holding_point: true, is_parking_spot: true, name: tinyRobot2_charger,
+      - {is_charger: true, is_holding_point: true, is_parking_spot: false, name: tinyRobot2_charger,
         spawn_robot_name: tinyRobot2, spawn_robot_type: Open-RMF/TinyRobot,
         allowedDeviationXY: 0.3}
 lifts: {}
