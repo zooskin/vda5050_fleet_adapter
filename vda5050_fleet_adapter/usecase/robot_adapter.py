@@ -103,6 +103,7 @@ class RobotAdapter:
         recharge_soc: float = 1.0,
         turn_angle_threshold: float = 0.2618,
         allowed_deviation_theta: float = 0.2618,
+        task_category_cache: dict[str, str] | None = None,
     ) -> None:
         """Initialize."""
         self.name = name
@@ -116,6 +117,9 @@ class RobotAdapter:
         self.recharge_soc = recharge_soc
         self.turn_angle_threshold = turn_angle_threshold
         self.allowed_deviation_theta = allowed_deviation_theta
+        self._task_category_cache: dict[str, str] = (
+            task_category_cache if task_category_cache is not None else {}
+        )
         self.action_completion_delay: float = 0.0
         self.action_durations: dict[str, float] = {}
 
@@ -732,9 +736,11 @@ class RobotAdapter:
 
         # Station node removal: path[-2]가 pickDrop이면
         # station(path[-1])을 경로에서 제거 (charging 패턴 동일)
+        # delivery task인 경우에만 적용 (go_to_place 등에서는 제거 안 함)
         if (
             self._pick_drop.destination is None
             and len(path) >= 2
+            and self._is_delivery_task()
         ):
             pre_dest = path[-2]
             pre_dest_attrs = self.nav_nodes.get(
@@ -1498,6 +1504,29 @@ class RobotAdapter:
                 'Could not get current_task_id for %s', self.name
             )
             return None
+
+    def _is_delivery_task(self) -> bool:
+        """현재 task가 delivery인지 확인한다.
+
+        task_state_update에서 캐싱한 category를 조회한다.
+
+        Returns:
+            delivery task이면 True.
+        """
+        task_id = self._get_current_task_id()
+        if task_id is None:
+            return False
+        category = self._task_category_cache.get(task_id)
+        if category is None:
+            time.sleep(0.1)
+            category = self._task_category_cache.get(task_id)
+        is_delivery = category is not None and 'delivery' in category
+        logger.info(
+            'Task category check [%s]: task_id=%s, '
+            'category=%s, is_delivery=%s',
+            self.name, task_id, category, is_delivery,
+        )
+        return is_delivery
 
     def _resolve_final_destination(
         self, destination: Any, fallback: str,
