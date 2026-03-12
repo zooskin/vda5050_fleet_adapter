@@ -3034,6 +3034,50 @@ class TestCharging:
                     f'{n.node_id} should be horizon'
                 )
 
+    def test_charging_at_pre_charger_position_none(
+        self, charging_adapter, mock_api
+    ):
+        """position=None 시 API에서 위치를 조회하여 charger 제거.
+
+        add_robot 직후 첫 navigate 시 self.position이 None인 경우,
+        API에서 위치를 조회하여 올바른 start_node를 결정한다.
+        로봇이 pre-charger(wp3)에 있으면 charger_1이 제거되고
+        wp3에 startCharging이 부착된다.
+        """
+        from vda5050_fleet_adapter.usecase.ports.robot_api import (
+            RobotUpdateData,
+        )
+        charging_adapter.position = None
+        mock_api.get_data.return_value = RobotUpdateData(
+            robot_name='AGV-001',
+            position=[5.0, 5.0, 0.0],
+            map_name='map1',
+            battery_soc=0.3,
+        )
+
+        dest = MagicMock()
+        dest.name = 'charger_1'
+        dest.final_name = 'charger_1'
+        dest.position = [5.0, 10.0, 0.0]
+        dest.map = 'map1'
+
+        charging_adapter.navigate(dest, MagicMock())
+        charging_adapter.cancel_cmd_attempt()
+
+        call_args = mock_api.navigate.call_args[0]
+        nodes = call_args[2]
+        node_ids = [n.node_id for n in nodes]
+
+        assert 'charger_1' not in node_ids
+        assert node_ids == ['wp3']
+
+        last_node = nodes[-1]
+        charge_actions = [
+            a for a in last_node.actions
+            if a.action_type == 'startCharging'
+        ]
+        assert len(charge_actions) == 1
+
 
 class TestChargingDecommission:
     """충전 중 decommission / SOC 기반 recommission 테스트.
@@ -3647,10 +3691,12 @@ class TestPickDropStationRemoval:
             'e9': {'start': 'wp6', 'end': 'wp5', 'attributes': {}},
         }
         graph = create_graph(nodes, edges)
+        task_cache = {'cart-delivery-002': 'delivery'}
         robot = RobotAdapter(
             name='AGV-001', api=mock_api, node=mock_node,
             fleet_handle=MagicMock(),
             nav_nodes=nodes, nav_edges=edges, nav_graph=graph,
+            task_category_cache=task_cache,
         )
         robot.configuration = MagicMock()
         mock_handle = MagicMock()

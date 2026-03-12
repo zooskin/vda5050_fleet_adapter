@@ -651,16 +651,30 @@ class RobotAdapter:
     def _find_start_node(self, goal_node: str) -> str:
         """현재 위치 기반으로 start_node를 결정한다.
 
+        self.position이 None이면 (add_robot 직후 첫 navigate 등)
+        API에서 현재 위치를 조회하여 사용한다.
+
         Args:
             goal_node: fallback으로 사용할 목적지 노드.
 
         Returns:
             start_node 이름.
         """
+        position = self.position
+        if position is None:
+            data = self.api.get_data(self.name)
+            if data is not None and data.position is not None:
+                position = data.position
+                logger.info(
+                    'Position was None for robot %s, '
+                    'fetched from API: %s',
+                    self.name, position,
+                )
+
         start_node = None
-        if self.position is not None:
+        if position is not None:
             start_node = find_nearest_node(
-                self.nav_nodes, self.position[0], self.position[1]
+                self.nav_nodes, position[0], position[1]
             )
         if start_node is None:
             start_node = goal_node
