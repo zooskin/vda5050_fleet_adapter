@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 import sys
 import threading
@@ -18,9 +19,16 @@ import time
 import rclpy
 import rclpy.node
 from rclpy.parameter import Parameter
+from rclpy.qos import (
+    QoSDurabilityPolicy,
+    QoSHistoryPolicy,
+    QoSProfile,
+    QoSReliabilityPolicy,
+)
 import rmf_adapter
 from rmf_adapter import Adapter
 import rmf_adapter.easy_full_control as rmf_easy
+from std_msgs.msg import String
 from vda5050_fleet_adapter.infra.mqtt.mqtt_client import MqttClient
 from vda5050_fleet_adapter.infra.mqtt.vda5050_robot_api import (
     Vda5050RobotAPI,
@@ -199,7 +207,32 @@ def main(argv: list[str] | None = None) -> None:
         f'prefix: {prefix}'
     )
 
-    # 8. 로봇별 RobotAdapter 생성
+    # 8. Task category 캐시: booking_id → category
+    task_category_cache: dict[str, str] = {}
+
+    def _on_task_state_update(msg: String) -> None:
+        try:
+            payload = json.loads(msg.data)
+        except (json.JSONDecodeError, TypeError):
+            return
+        data = payload.get('data', {})
+        booking_id = data.get('booking', {}).get('id')
+        category = data.get('category')
+        if booking_id and category:
+            task_category_cache[booking_id] = category
+
+    task_state_qos = QoSProfile(
+        history=QoSHistoryPolicy.KEEP_LAST,
+        depth=100,
+        reliability=QoSReliabilityPolicy.RELIABLE,
+        durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+    )
+    node.create_subscription(
+        String, '/task_state_update',
+        _on_task_state_update, task_state_qos,
+    )
+
+    # 9. 로봇별 RobotAdapter 생성
     import math as _math
     arrival_threshold = config_yaml.get('rmf_fleet', {}).get(
         'arrival_threshold', 0.5
@@ -247,6 +280,7 @@ def main(argv: list[str] | None = None) -> None:
             recharge_soc=recharge_soc,
             turn_angle_threshold=turn_angle_threshold,
             allowed_deviation_theta=allowed_deviation_theta,
+            task_category_cache=task_category_cache,
         )
         robot.action_completion_delay = action_completion_delay
         robot.action_durations = action_durations
