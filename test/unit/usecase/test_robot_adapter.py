@@ -3659,10 +3659,12 @@ class TestPickDropFlow:
             'e7': {'start': 'wp1', 'end': 'wp4', 'attributes': {}},
         }
         graph = create_graph(nodes, edges)
+        task_cache = {'cart-delivery-001': 'delivery'}
         robot = RobotAdapter(
             name='AGV-001', api=mock_api, node=mock_node,
             fleet_handle=MagicMock(),
             nav_nodes=nodes, nav_edges=edges, nav_graph=graph,
+            task_category_cache=task_cache,
         )
         robot.configuration = MagicMock()
         mock_handle = MagicMock()

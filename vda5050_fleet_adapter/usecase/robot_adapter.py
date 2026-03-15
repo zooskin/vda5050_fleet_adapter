@@ -616,9 +616,10 @@ class RobotAdapter:
             self._charging.is_pending = False
             self._charging.station_name = None
 
-        # pickDrop 감지: nav_graph 속성 pickDrop으로 판단
+        # pickDrop 감지: nav_graph 속성 pickDrop + delivery task만 적용.
+        # go_to_place 등 일반 task에서는 pickDrop 노드도 정상 목적지로 취급.
         dest_is_pick_drop = dest_node_attrs.get('pickDrop', False)
-        if dest_is_pick_drop and dest_name_raw:
+        if dest_is_pick_drop and dest_name_raw and self._is_delivery_task():
             self._pick_drop.destination = dest_name_raw
         else:
             self._pick_drop.destination = None
