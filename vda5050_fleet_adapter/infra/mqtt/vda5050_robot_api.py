@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import datetime, UTC
 import logging
 import threading
-from typing import Any
+from typing import Any, Callable
 import uuid
 
 from vda5050_fleet_adapter.domain.entities.action import Action
@@ -78,6 +78,8 @@ class Vda5050RobotAPI(RobotAPI):
         # downloadMap 설정 및 pending 상태
         self._download_map_config = download_map_config
         self._download_map_pending: dict[str, str | None] = {}
+        # 로봇 offline 콜백: Callable[[str], None] (robot_name)
+        self._on_robot_offline_cb: Callable[[str], None] | None = None
 
     def subscribe_robot(self, robot_name: str) -> None:
         """로봇의 MQTT 토픽을 구독한다.
@@ -100,6 +102,16 @@ class Vda5050RobotAPI(RobotAPI):
             qos=1,
         )
         logger.info('Subscribed to %s', connection_topic)
+
+    def set_on_robot_offline(
+        self, callback: Callable[[str], None],
+    ) -> None:
+        """로봇 offline 감지 시 호출될 콜백을 등록한다.
+
+        Args:
+            callback: robot_name을 인자로 받는 콜백 함수.
+        """
+        self._on_robot_offline_cb = callback
 
     def is_robot_connected(self, robot_name: str) -> bool:
         """로봇의 VDA5050 연결 상태가 ONLINE인지 확인한다.
@@ -611,6 +623,17 @@ class Vda5050RobotAPI(RobotAPI):
                 'Connection update: robot=%s, state=%s',
                 robot_name, new_state,
             )
+
+            # OFFLINE 전환 감지 시 콜백 호출
+            if (
+                new_state in (
+                    ConnectionState.OFFLINE,
+                    ConnectionState.CONNECTIONBROKEN,
+                )
+                and prev_state == ConnectionState.ONLINE
+                and self._on_robot_offline_cb is not None
+            ):
+                self._on_robot_offline_cb(robot_name)
 
             # ONLINE 전환 감지 시 stale state 제거 + downloadMap 전송
             if (
