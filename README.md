@@ -30,10 +30,18 @@ AGV와는 MQTT(VDA5050)로, RMF와는 `rmf_fleet_adapter_python`(`rmf_easy`) API
 - RMF 새 경로 `navigate()` → `cancelOrder` → 1초 대기 → 새 orderID로 order 전송
 
 ### 충전 관리
-- nav_graph의 `is_charger` 속성 또는 `dock` 파라미터로 충전 태스크 자동 감지
+- nav_graph의 `is_charger` 속성으로 충전 태스크 자동 감지
 - charger 노드 제거 후 pre-charger까지 navigate → `startCharging` nodeAction 부착
+- pre-charger와 charger 간 인접성 검증: 인접하지 않으면 charger 제거 건너뜀
 - 충전 완료 후 다음 order에 `stopCharging` nodeAction 자동 부착
 - 충전 중 SOC가 `recharge_soc`에 도달할 때까지 자동 decommission
+- 충전 decommission 중 commission 진동 방지 (VDA5050 상태에 의한 commission 덮어쓰기 차단)
+- 충전 완료 후 같은 charger로 재전송 시 불필요한 stopCharging+startCharging 루프 방지
+
+### pickDrop (Cart Delivery)
+- **pickDrop Base/Horizon 분리**: `pickDrop: true` 속성 노드를 Horizon으로 유지, `execute_action`에서 Base로 전환 + action 부착
+- **Station Node Removal**: pickDrop 직전 노드(staging node)까지만 navigate, station node는 order에서 제거
+- **delivery task 전용**: pickDrop 경로 제거는 delivery task에서만 적용. `go_to_place` 등 일반 task에서는 pickDrop 노드도 정상 목적지로 취급
 
 ### Execute Action as NodeAction
 - 활성 order가 있으면 `execute_action`을 instantAction 대신 order update의 nodeAction으로 전송
@@ -42,6 +50,13 @@ AGV와는 MQTT(VDA5050)로, RMF와는 `rmf_fleet_adapter_python`(`rmf_easy`) API
 ### Robot Connection 관리
 - VDA5050 connection topic 구독으로 연결 상태 캐싱
 - 미연결 로봇은 RMF에 `add_robot`하지 않고, navigate 등 명령 전송 전 pre-flight check
+- **Reconnect 시 stale state 제거**: 로봇 ONLINE 전환 시 이전 state cache를 clear하여 정확한 위치 보고 보장
+- **Reconnect 시 충전 상태 리셋**: navigate/update에서 reconnection 감지 시 stale `was_charging` 등 리셋하여 불필요한 stopCharging 방지
+
+### Parking Reservation 관리
+- `rmf/reservations/allocation` 토픽 구독으로 로봇별 reservation ticket 캐싱
+- 로봇 OFFLINE/CONNECTIONBROKEN 감지 시 `rmf/reservations/release`로 ReleaseRequest 자동 발행
+- 다른 로봇이 해당 parking spot을 즉시 사용 가능
 
 ### downloadMap
 - 로봇 ONLINE 전환 시 `downloadMap` instantAction 자동 전송
@@ -53,6 +68,7 @@ AGV와는 MQTT(VDA5050)로, RMF와는 `rmf_fleet_adapter_python`(`rmf_easy`) API
   - OFFLINE/CONNECTIONBROKEN, FATAL error, E-stop, Manual mode → 전체 decommission
   - SEMIAUTOMATIC → 부분 commission (dispatched=false)
   - AUTOMATIC + 정상 → 전체 commission
+  - 충전 decommission 중에는 VDA5050 상태 기반 commission 갱신 차단
 
 ## 디렉토리 구조
 
@@ -111,7 +127,7 @@ vda5050_fleet_adapter/
 │   └── config/
 │       └── config.yaml                    #    기본 설정 (mrceki 형식)
 │
-└── test/                                  # 테스트 (304 tests)
+└── test/                                  # 테스트 (341 tests)
     ├── conftest.py                        #    공통 fixture
     └── unit/
         ├── domain/                        #    도메인 테스트
@@ -157,10 +173,10 @@ presentation ──→ infra ──→ usecase ──→ domain
 
 ### 핵심 컴포넌트
 
-- **RobotAdapter** (`usecase/robot_adapter.py`): RMF의 `RobotCallbacks`(navigate, stop, execute_action)을 받아 VDA5050 AGV에 명령을 전달하는 브릿지. 3-Tier 경로 생성, Order 라이프사이클 관리, 도착 감지(거리+theta), Negotiation 처리, 충전 관리, Commission 자동 업데이트 등 핵심 로직 포함.
-- **Vda5050RobotAPI** (`infra/mqtt/vda5050_robot_api.py`): MQTT로 VDA5050 Order/InstantActions를 발행하고, AGV State/Connection을 구독하여 캐시. downloadMap 자동 전송, 연결 상태 관리.
+- **RobotAdapter** (`usecase/robot_adapter.py`): RMF의 `RobotCallbacks`(navigate, stop, execute_action)을 받아 VDA5050 AGV에 명령을 전달하는 브릿지. 3-Tier 경로 생성, Order 라이프사이클 관리, 도착 감지(거리+theta), Negotiation 처리, 충전 관리, Commission 자동 업데이트, Parking Reservation 연동 등 핵심 로직 포함.
+- **Vda5050RobotAPI** (`infra/mqtt/vda5050_robot_api.py`): MQTT로 VDA5050 Order/InstantActions를 발행하고, AGV State/Connection을 구독하여 캐시. downloadMap 자동 전송, 연결 상태 관리, offline 콜백 지원.
 - **graph_utils** (`infra/nav_graph/graph_utils.py`): RMF nav graph 파싱, networkx 최단 경로 탐색, nudged 좌표 변환, VDA5050 Node/Edge 생성, Base 노드 theta 계산.
-- **main.py** (`presentation/main.py`): rmf_demos_fleet_adapter + mrceki 패턴의 진입점. FleetConfiguration 로드, Adapter 생성, 로봇별 RobotAdapter 생성, 주기적 상태 업데이트 루프 실행.
+- **main.py** (`presentation/main.py`): rmf_demos_fleet_adapter + mrceki 패턴의 진입점. FleetConfiguration 로드, Adapter 생성, 로봇별 RobotAdapter 생성, Parking Reservation 관리, 주기적 상태 업데이트 루프 실행.
 
 ## 설치 및 빌드
 
@@ -228,6 +244,9 @@ rmf_fleet:
   turn_angle_threshold: 15.0         # degrees, theta 판정 최소 회전각
   allowed_deviation_theta: 15.0      # degrees, theta 허용 오차
 
+# Parking reservation 설정
+use_parking_reservations: true       # RMF parking reservation 시스템 사용
+
 # MQTT / VDA5050 설정
 fleet_manager:
   ip: "127.0.0.1"
@@ -252,21 +271,23 @@ fleet_manager:
 | 파라미터 | 기본값 | 설명 |
 |---------|--------|------|
 | `arrival_threshold` | 0.5 | 거리 기반 도착 판정 threshold (m) |
-| `turn_angle_threshold` | 15.0 | Base 노드에서 theta 판정을 적용하는 최소 회전각 (°) |
-| `allowed_deviation_theta` | 15.0 | theta 도착 판정 허용 오차 (°) |
+| `turn_angle_threshold` | 15.0 | Base 노드에서 theta 판정을 적용하는 최소 회전각 (deg) |
+| `allowed_deviation_theta` | 15.0 | theta 도착 판정 허용 오차 (deg) |
 | `recharge_threshold` | 0.40 | 자동 충전 task 발생 SOC threshold |
 | `recharge_soc` | 1.0 | 충전 중 decommission 해제 SOC |
 | `robot_state_update_frequency` | 10.0 | 상태 업데이트 주기 (Hz) |
+| `action_completion_delay` | 0.0 | action 완료 후 feedback 지연 시간 (초) |
+| `use_parking_reservations` | false | RMF parking reservation 시스템 사용 여부 |
 
 ## 테스트
 
 ```bash
 cd ~/rmf_ws/src/vda5050_fleet_adapter
 
-# 전체 테스트 (304 tests)
+# 전체 테스트 (341 tests)
 python3 -m pytest test/ -v
 
-# 단위 테스트만 (301 tests)
+# 단위 테스트만
 python3 -m pytest test/unit/ -v
 
 # colcon 테스트
