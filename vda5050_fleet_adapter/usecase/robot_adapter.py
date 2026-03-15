@@ -462,6 +462,13 @@ class RobotAdapter:
         self._nav.target_position = list(destination.position[:2])
         self._nav.is_navigating = True
 
+        # Reconnection 후 navigate가 update()보다 먼저 호출될 수 있음.
+        # stale was_charging이 남아있으면 불필요한 stopCharging 부착 방지.
+        robot_connected = self.api.is_robot_connected(self.name)
+        if not self._was_connected and robot_connected:
+            self._on_reconnect()
+        self._was_connected = robot_connected
+
         dest_name_raw = getattr(destination, 'name', '')
         self._detect_dest_attributes(dest_name_raw)
 
