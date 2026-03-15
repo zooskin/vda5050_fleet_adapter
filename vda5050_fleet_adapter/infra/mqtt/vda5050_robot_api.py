@@ -612,11 +612,18 @@ class Vda5050RobotAPI(RobotAPI):
                 robot_name, new_state,
             )
 
-            # ONLINE 전환 감지 시 downloadMap 전송
+            # ONLINE 전환 감지 시 stale state 제거 + downloadMap 전송
             if (
                 new_state == ConnectionState.ONLINE
                 and prev_state != ConnectionState.ONLINE
             ):
+                with self._lock:
+                    self._state_cache.pop(robot_name, None)
+                logger.info(
+                    'Cleared stale state cache on reconnect: '
+                    'robot=%s',
+                    robot_name,
+                )
                 self._send_download_map(robot_name)
         except Exception:
             logger.exception(
