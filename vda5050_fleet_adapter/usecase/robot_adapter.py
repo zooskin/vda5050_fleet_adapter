@@ -511,6 +511,28 @@ class RobotAdapter:
             path, goal_node, target,
         )
 
+        # 충전 완료 후 같은 charger로 다시 보내질 때 조기 리턴.
+        # charger 노드 제거로 path=[pre-charger] 1개만 남고,
+        # 로봇이 이미 해당 위치에 있고 이전에 충전했었으면(was_charging)
+        # 불필요한 stopCharging+startCharging 사이클 방지.
+        if (
+            self._charging.is_pending
+            and self._charging.was_charging
+            and len(path) == 1
+            and path[0] == start_node
+        ):
+            self._charging.is_pending = False
+            self._nav.is_navigating = False
+            self._order.completed_normally = True
+            self.execution.finished()
+            self.execution = None
+            logger.info(
+                'Robot %s already at charger pre-charger %s, '
+                'completing immediately',
+                self.name, path[0],
+            )
+            return
+
         # 도착 판정용 target_position을 base end node 좌표로 설정
         base_end_name = path[base_end_index]
         self._nav.target_position = [
