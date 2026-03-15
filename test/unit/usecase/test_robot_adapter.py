@@ -3071,13 +3071,14 @@ class TestCharging:
     def test_charging_position_none_fallback(
         self, charging_adapter, mock_api
     ):
-        """position이 None일 때 start_node가 goal_node로 fallback.
+        """position이 None이고 API 조회도 실패 시 start_node=goal_node fallback.
 
-        position이 None이면 charger 노드만 포함된 단일 노드 경로가
-        생성되어 charger 제거가 불가능했던 버그 재현.
+        position이 None이고 get_data도 None을 반환하면 charger 노드만
+        포함된 단일 노드 경로가 생성되어 charger 제거가 불가능.
         """
-        # position 미설정 (처음 연결 시 update 전)
+        # position 미설정 + API 조회도 실패
         charging_adapter.position = None
+        mock_api.get_data.return_value = None
 
         dest = MagicMock()
         dest.name = 'charger_1'
@@ -3093,9 +3094,8 @@ class TestCharging:
         nodes = call_args[2]
         node_ids = [n.node_id for n in nodes]
 
-        # position None → start_node=charger_1, path=[charger_1]
+        # position None + API 실패 → start_node=charger_1, path=[charger_1]
         # len(path) < 2이므로 charger 제거 불가 → charger_1 포함
-        # (이 테스트는 현재 동작을 문서화; main.py에서 position 설정으로 방지)
         assert 'charger_1' in node_ids
 
     def test_charger_removal_skipped_when_not_adjacent(

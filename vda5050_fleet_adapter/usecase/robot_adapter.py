@@ -313,6 +313,11 @@ class RobotAdapter:
         if commission_state is None:
             return
 
+        # 충전 decommission 중에는 VDA5050 상태로 commission을 올리지 않음.
+        # _apply_charging_decommission()이 SOC 기반으로 recommission을 관리.
+        if self._charging.is_decommissioned:
+            return
+
         if commission_state == self._last_commission:
             return
 
