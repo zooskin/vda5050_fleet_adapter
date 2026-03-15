@@ -79,6 +79,7 @@ def _update_robot(robot: RobotAdapter) -> None:
                 f'[{robot.name}] waiting for downloadMap to complete...'
             )
             return
+        robot.position = data.position
         robot.update_handle = robot.fleet_handle.add_robot(
             robot.name,
             state,
