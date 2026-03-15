@@ -2,6 +2,8 @@
 # mrceki/vda5050_fleet_adapter 형식 (Open-RMF FleetConfiguration 호환)
 
 # FLEET CONFIG =================================================================
+server_uri: "ws://localhost:8100/_internal"
+
 rmf_fleet:
   name: "vda5050_fleet"
   limits:

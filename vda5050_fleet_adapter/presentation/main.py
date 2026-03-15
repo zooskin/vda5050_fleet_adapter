@@ -134,15 +134,16 @@ def main(argv: list[str] | None = None) -> None:
     config_path = args.config_file
     nav_graph_path = args.nav_graph
 
-    # 1. FleetConfiguration 로드
-    fleet_config = rmf_easy.FleetConfiguration.from_config_files(
-        config_path, nav_graph_path
-    )
-    assert fleet_config, f'Failed to parse config file [{config_path}]'
-
-    # 2. YAML config 직접 로드 (fleet_manager 등 추가 설정)
+    # 1. YAML config 로드
     with open(config_path, 'r') as f:
         config_yaml = yaml.safe_load(f)
+
+    # 2. FleetConfiguration 로드 (server_uri 포함)
+    server_uri = config_yaml.get('server_uri', None) or None
+    fleet_config = rmf_easy.FleetConfiguration.from_config_files(
+        config_path, nav_graph_path, server_uri=server_uri
+    )
+    assert fleet_config, f'Failed to parse config file [{config_path}]'
 
     fleet_name = fleet_config.fleet_name
     node = rclpy.node.Node(f'{fleet_name}_command_handle')
