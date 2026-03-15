@@ -148,6 +148,9 @@ class RobotAdapter:
         # Commission 상태 추적
         self._last_commission: Any | None = None
 
+        # 로봇 연결 상태 추적 (reconnection 감지용)
+        self._was_connected: bool = True
+
     def update(self, state: Any, data: RobotUpdateData) -> None:
         """주기적 상태 업데이트.
 
@@ -159,6 +162,13 @@ class RobotAdapter:
             data: 로봇 상태 데이터.
         """
         self.position = data.position
+
+        # Reconnection 감지: 로봇이 재연결되면 stale 충전 상태 리셋
+        robot_connected = self.api.is_robot_connected(self.name)
+        if not self._was_connected and robot_connected:
+            self._on_reconnect()
+        self._was_connected = robot_connected
+
         activity_identifier = None
 
         if self.execution is not None:
@@ -303,6 +313,11 @@ class RobotAdapter:
         if commission_state is None:
             return
 
+        # 충전 decommission 중에는 VDA5050 상태로 commission을 올리지 않음.
+        # _apply_charging_decommission()이 SOC 기반으로 recommission을 관리.
+        if self._charging.is_decommissioned:
+            return
+
         if commission_state == self._last_commission:
             return
 
@@ -368,6 +383,25 @@ class RobotAdapter:
             self.name, battery_soc, self.recharge_soc,
         )
 
+    def _on_reconnect(self) -> None:
+        """로봇 reconnection 시 stale 상태를 리셋한다.
+
+        충전 중 로봇이 종료 후 다른 위치에서 재시작될 경우,
+        was_charging/is_decommissioned 등 이전 충전 상태가 남아있으면
+        다음 order에 불필요한 stopCharging이 붙거나 decommission이
+        유지되는 문제를 방지한다.
+        """
+        logger.info(
+            'Robot reconnected [%s]: resetting stale charging state '
+            '(was_charging=%s, is_decommissioned=%s, is_active=%s)',
+            self.name,
+            self._charging.was_charging,
+            self._charging.is_decommissioned,
+            self._charging.is_active,
+        )
+        self._charging = ChargingState()
+        self._last_commission = None
+
     def make_callbacks(self) -> Any:
         """RMF RobotCallbacks를 생성한다.
 
@@ -428,6 +462,13 @@ class RobotAdapter:
         self._nav.target_position = list(destination.position[:2])
         self._nav.is_navigating = True
 
+        # Reconnection 후 navigate가 update()보다 먼저 호출될 수 있음.
+        # stale was_charging이 남아있으면 불필요한 stopCharging 부착 방지.
+        robot_connected = self.api.is_robot_connected(self.name)
+        if not self._was_connected and robot_connected:
+            self._on_reconnect()
+        self._was_connected = robot_connected
+
         dest_name_raw = getattr(destination, 'name', '')
         self._detect_dest_attributes(dest_name_raw)
 
@@ -476,6 +517,28 @@ class RobotAdapter:
         path, base_end_index = self._apply_path_modifiers(
             path, goal_node, target,
         )
+
+        # 충전 완료 후 같은 charger로 다시 보내질 때 조기 리턴.
+        # charger 노드 제거로 path=[pre-charger] 1개만 남고,
+        # 로봇이 이미 해당 위치에 있고 이전에 충전했었으면(was_charging)
+        # 불필요한 stopCharging+startCharging 사이클 방지.
+        if (
+            self._charging.is_pending
+            and self._charging.was_charging
+            and len(path) == 1
+            and path[0] == start_node
+        ):
+            self._charging.is_pending = False
+            self._nav.is_navigating = False
+            self._order.completed_normally = True
+            self.execution.finished()
+            self.execution = None
+            logger.info(
+                'Robot %s already at charger pre-charger %s, '
+                'completing immediately',
+                self.name, path[0],
+            )
+            return
 
         # 도착 판정용 target_position을 base end node 좌표로 설정
         base_end_name = path[base_end_index]
@@ -553,9 +616,10 @@ class RobotAdapter:
             self._charging.is_pending = False
             self._charging.station_name = None
 
-        # pickDrop 감지: nav_graph 속성 pickDrop으로 판단
+        # pickDrop 감지: nav_graph 속성 pickDrop + delivery task만 적용.
+        # go_to_place 등 일반 task에서는 pickDrop 노드도 정상 목적지로 취급.
         dest_is_pick_drop = dest_node_attrs.get('pickDrop', False)
-        if dest_is_pick_drop and dest_name_raw:
+        if dest_is_pick_drop and dest_name_raw and self._is_delivery_task():
             self._pick_drop.destination = dest_name_raw
         else:
             self._pick_drop.destination = None
@@ -651,16 +715,30 @@ class RobotAdapter:
     def _find_start_node(self, goal_node: str) -> str:
         """현재 위치 기반으로 start_node를 결정한다.
 
+        self.position이 None이면 (add_robot 직후 첫 navigate 등)
+        API에서 현재 위치를 조회하여 사용한다.
+
         Args:
             goal_node: fallback으로 사용할 목적지 노드.
 
         Returns:
             start_node 이름.
         """
+        position = self.position
+        if position is None:
+            data = self.api.get_data(self.name)
+            if data is not None and data.position is not None:
+                position = data.position
+                logger.info(
+                    'Position was None for robot %s, '
+                    'fetched from API: %s',
+                    self.name, position,
+                )
+
         start_node = None
-        if self.position is not None:
+        if position is not None:
             start_node = find_nearest_node(
-                self.nav_nodes, self.position[0], self.position[1]
+                self.nav_nodes, position[0], position[1]
             )
         if start_node is None:
             start_node = goal_node
@@ -849,16 +927,24 @@ class RobotAdapter:
                     self._pick_drop.destination, path,
                 )
 
-        # ── Charging: charger 노드를 경로에서 항상 제거 ──
+        # ── Charging: charger 노드를 경로에서 제거 ──
+        # pre-charger(charger 직전 노드)가 charger와 인접해야만 제거.
+        # 인접하지 않으면 경로가 불완전한 것이므로 제거하지 않는다.
         _final_is_charger = (
             self._order.final_destination is not None
             and self.nav_nodes.get(
                 self._order.final_destination, {}
             ).get('attributes', {}).get('is_charger', False)
         )
+        _pre_charger_adjacent = (
+            len(path) >= 2
+            and self.nav_graph.has_edge(
+                path[-2], self._order.final_destination
+            )
+        )
         if (
             _final_is_charger
-            and len(path) >= 2
+            and _pre_charger_adjacent
             and path[-1] == self._order.final_destination
         ):
             path = path[:-1]
@@ -873,6 +959,15 @@ class RobotAdapter:
                 'Charging: removed charger node for robot %s, '
                 'pre_charger=%s, station=%s, path=%s',
                 self.name, path[-1],
+                self._order.final_destination, path,
+            )
+        elif _final_is_charger and not _pre_charger_adjacent:
+            logger.warning(
+                'Charging: skipped charger removal for robot %s, '
+                'path[-2]=%s is not adjacent to charger=%s, '
+                'path=%s',
+                self.name,
+                path[-2] if len(path) >= 2 else 'N/A',
                 self._order.final_destination, path,
             )
 

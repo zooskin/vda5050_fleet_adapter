@@ -28,6 +28,10 @@ from rclpy.qos import (
 import rmf_adapter
 from rmf_adapter import Adapter
 import rmf_adapter.easy_full_control as rmf_easy
+from rmf_reservation_msgs.msg import (
+    ReleaseRequest as ReservationReleaseRequest,
+    ReservationAllocation,
+)
 from std_msgs.msg import String
 from vda5050_fleet_adapter.infra.mqtt.mqtt_client import MqttClient
 from vda5050_fleet_adapter.infra.mqtt.vda5050_robot_api import (
@@ -79,6 +83,7 @@ def _update_robot(robot: RobotAdapter) -> None:
                 f'[{robot.name}] waiting for downloadMap to complete...'
             )
             return
+        robot.position = data.position
         robot.update_handle = robot.fleet_handle.add_robot(
             robot.name,
             state,
@@ -129,15 +134,16 @@ def main(argv: list[str] | None = None) -> None:
     config_path = args.config_file
     nav_graph_path = args.nav_graph
 
-    # 1. FleetConfiguration 로드
-    fleet_config = rmf_easy.FleetConfiguration.from_config_files(
-        config_path, nav_graph_path
-    )
-    assert fleet_config, f'Failed to parse config file [{config_path}]'
-
-    # 2. YAML config 직접 로드 (fleet_manager 등 추가 설정)
+    # 1. YAML config 로드
     with open(config_path, 'r') as f:
         config_yaml = yaml.safe_load(f)
+
+    # 2. FleetConfiguration 로드 (server_uri 포함)
+    server_uri = config_yaml.get('server_uri', None) or None
+    fleet_config = rmf_easy.FleetConfiguration.from_config_files(
+        config_path, nav_graph_path, server_uri=server_uri
+    )
+    assert fleet_config, f'Failed to parse config file [{config_path}]'
 
     fleet_name = fleet_config.fleet_name
     node = rclpy.node.Node(f'{fleet_name}_command_handle')
@@ -287,7 +293,69 @@ def main(argv: list[str] | None = None) -> None:
         robot.configuration = robot_config
         robots[robot_name] = robot
 
-    # 9. 업데이트 루프
+    # 9-1. Reservation release: 로봇 offline 시 점유 해제
+    reservation_lock = threading.Lock()
+    # {robot_name: ReservationAllocation}
+    reservation_cache: dict[str, ReservationAllocation] = {}
+
+    reservation_release_pub = node.create_publisher(
+        ReservationReleaseRequest,
+        'rmf/reservations/release',
+        QoSProfile(
+            history=QoSHistoryPolicy.KEEP_LAST,
+            depth=10,
+            reliability=QoSReliabilityPolicy.RELIABLE,
+            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+        ),
+    )
+
+    def _on_reservation_allocation(
+        msg: ReservationAllocation,
+    ) -> None:
+        robot_name = msg.ticket.header.robot_name
+        if msg.ticket.header.fleet_name != fleet_name:
+            return
+        if robot_name not in robots:
+            return
+        with reservation_lock:
+            reservation_cache[robot_name] = msg
+        node.get_logger().info(
+            f'Reservation cached: robot={robot_name}, '
+            f'resource={msg.resource}, '
+            f'ticket_id={msg.ticket.ticket_id}'
+        )
+
+    node.create_subscription(
+        ReservationAllocation,
+        'rmf/reservations/allocation',
+        _on_reservation_allocation,
+        QoSProfile(
+            history=QoSHistoryPolicy.KEEP_LAST,
+            depth=100,
+            reliability=QoSReliabilityPolicy.RELIABLE,
+            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+        ),
+    )
+
+    def _on_robot_offline(robot_name: str) -> None:
+        with reservation_lock:
+            alloc = reservation_cache.pop(robot_name, None)
+        if alloc is None:
+            return
+        release_msg = ReservationReleaseRequest()
+        release_msg.ticket = alloc.ticket
+        release_msg.location = alloc.resource
+        reservation_release_pub.publish(release_msg)
+        node.get_logger().info(
+            f'Reservation released on offline: '
+            f'robot={robot_name}, '
+            f'resource={alloc.resource}, '
+            f'ticket_id={alloc.ticket.ticket_id}'
+        )
+
+    api.set_on_robot_offline(_on_robot_offline)
+
+    # 10. 업데이트 루프
     update_period = 1.0 / config_yaml.get('rmf_fleet', {}).get(
         'robot_state_update_frequency', 10.0
     )
@@ -317,7 +385,7 @@ def main(argv: list[str] | None = None) -> None:
     )
     update_thread.start()
 
-    # 10. ROS 2 spin
+    # 11. ROS 2 spin
     rclpy_executor = rclpy.executors.SingleThreadedExecutor()
     rclpy_executor.add_node(node)
 
