@@ -2465,18 +2465,19 @@ class TestCartDeliveryFlow:
 
 
 class TestCharging:
-    """충전 (startCharging/stopCharging) 테스트.
+    """충전 (execute_action 기반 startCharging/stopCharging) 테스트.
 
     Graph (charger 포함):
         wp1(0,0) --- wp2(5,0) --- wp3(5,5)
                                     |
                                 charger_1(5,10)
 
-    설계:
-    - startCharging: charger 앞 노드에 nodeAction으로 부착
-    - startCharging FINISHED = 도킹+충전 시작 완료 → execution.finished()
-    - stopCharging: 다음 order의 첫 번째 노드에 nodeAction으로 부착
-    - adapter는 SOC를 모니터링하지 않음
+    새 설계 (ChargeBattery.cpp 패치 후):
+    - RMF: navigate(charger_wp) → execute_action("startCharging") → WaitForCharge
+    - on_cancel: execute_action("stopCharging")
+    - navigate: charger 노드 제거, pre-charger 도착 시 execution.finished()
+    - startCharging: instantAction 전송, execution.finished() 호출 안 함
+    - stopCharging: instantAction 전송, AGV FINISHED 시 execution.finished()
     """
 
     @pytest.fixture
@@ -2522,10 +2523,10 @@ class TestCharging:
         robot.position = [0.0, 0.0, 0.0]
         return robot
 
-    def test_navigate_to_charger_sets_charging_pending(
+    def test_navigate_to_charger_stores_names(
         self, charging_adapter, mock_api
     ):
-        """is_charger 속성 노드로 navigate 시 _is_charging_pending이 True."""
+        """Charger로 navigate 시 charger/pre-charger 이름이 저장된다."""
         dest = MagicMock()
         dest.name = 'charger_1'
         dest.final_name = 'charger_1'
@@ -2535,13 +2536,13 @@ class TestCharging:
         charging_adapter.navigate(dest, MagicMock())
         charging_adapter.cancel_cmd_attempt()
 
-        assert charging_adapter._charging.is_pending is True
-        assert charging_adapter._charging.station_name == 'charger_1'
+        assert charging_adapter._charger_name == 'charger_1'
+        assert charging_adapter._pre_charger_name == 'wp3'
 
-    def test_navigate_to_non_charger_no_charging(
+    def test_navigate_to_non_charger_no_names(
         self, charging_adapter, mock_api
     ):
-        """is_charger 속성이 없는 노드로 navigate 시 충전 비활성."""
+        """Non-charger 노드로 navigate 시 charger 이름 미설정."""
         dest = MagicMock()
         dest.name = 'wp2'
         dest.final_name = 'wp3'
@@ -2551,8 +2552,8 @@ class TestCharging:
         charging_adapter.navigate(dest, MagicMock())
         charging_adapter.cancel_cmd_attempt()
 
-        assert charging_adapter._charging.is_pending is False
-        assert charging_adapter._charging.station_name is None
+        assert charging_adapter._charger_name is None
+        assert charging_adapter._pre_charger_name is None
 
     def test_charging_order_excludes_charger_node(
         self, charging_adapter, mock_api
@@ -2573,55 +2574,10 @@ class TestCharging:
 
         assert 'charger_1' not in node_ids
 
-    def test_charging_order_has_start_charging_action(
+    def test_navigate_to_charger_completes_on_arrival(
         self, charging_adapter, mock_api
     ):
-        """충전 order의 마지막 base 노드에 startCharging 부착."""
-        dest = MagicMock()
-        dest.name = 'charger_1'
-        dest.final_name = 'charger_1'
-        dest.position = [5.0, 10.0, 0.0]
-        dest.map = 'map1'
-
-        charging_adapter.navigate(dest, MagicMock())
-        charging_adapter.cancel_cmd_attempt()
-
-        call_args = mock_api.navigate.call_args[0]
-        nodes = call_args[2]
-
-        # 마지막 노드에 startCharging action이 있어야 함
-        last_node = nodes[-1]
-        assert len(last_node.actions) >= 1
-        charge_action = last_node.actions[-1]
-        assert charge_action.action_type == 'startCharging'
-
-    def test_start_charging_action_has_station_name(
-        self, charging_adapter, mock_api
-    ):
-        """Verify startCharging action has stationName parameter."""
-        dest = MagicMock()
-        dest.name = 'charger_1'
-        dest.final_name = 'charger_1'
-        dest.position = [5.0, 10.0, 0.0]
-        dest.map = 'map1'
-
-        charging_adapter.navigate(dest, MagicMock())
-        charging_adapter.cancel_cmd_attempt()
-
-        call_args = mock_api.navigate.call_args[0]
-        nodes = call_args[2]
-        last_node = nodes[-1]
-        charge_action = last_node.actions[-1]
-
-        assert len(charge_action.action_parameters) == 1
-        param = charge_action.action_parameters[0]
-        assert param.key == 'stationName'
-        assert param.value == 'charger_1'
-
-    def test_arrival_at_pre_charger_transitions_to_charging(
-        self, charging_adapter, mock_api
-    ):
-        """Pre-charger 노드 도착 시 _is_charging 전환, finished 미호출."""
+        """Pre-charger 도착 시 execution.finished()가 호출된다."""
         dest = MagicMock()
         dest.name = 'charger_1'
         dest.final_name = 'charger_1'
@@ -2632,7 +2588,6 @@ class TestCharging:
         charging_adapter.navigate(dest, execution)
         charging_adapter.cancel_cmd_attempt()
 
-        # pre-charger 노드(wp3)에 도착 시뮬레이션
         state = MagicMock()
         target = charging_adapter._nav.target_position
         data = RobotUpdateData(
@@ -2640,212 +2595,144 @@ class TestCharging:
             position=[target[0], target[1], 0.0],
             battery_soc=0.50,
         )
-
-        charging_adapter.update(state, data)
-
-        execution.finished.assert_not_called()
-        assert charging_adapter._charging.is_active is True
-        assert charging_adapter._charging.is_pending is False
-        assert charging_adapter._nav.is_navigating is False
-        assert charging_adapter.execution is execution
-
-    def test_charging_completes_when_action_finished(
-        self, charging_adapter, mock_api
-    ):
-        """Charging completes when startCharging action reports FINISHED."""
-        dest = MagicMock()
-        dest.name = 'charger_1'
-        dest.final_name = 'charger_1'
-        dest.position = [5.0, 10.0, 0.0]
-        dest.map = 'map1'
-        execution = MagicMock()
-
-        charging_adapter.navigate(dest, execution)
-        charging_adapter.cancel_cmd_attempt()
-
-        # Phase 1: pre-charger 도착
-        state = MagicMock()
-        target = charging_adapter._nav.target_position
-        data = RobotUpdateData(
-            robot_name='AGV-001', map_name='map1',
-            position=[target[0], target[1], 0.0],
-            battery_soc=0.50,
-        )
-        charging_adapter.update(state, data)
-        assert charging_adapter._charging.is_active is True
-
-        # Phase 2: AGV가 startCharging action FINISHED 보고
-        mock_api.is_command_completed.return_value = True
         charging_adapter.update(state, data)
 
         execution.finished.assert_called_once()
         assert charging_adapter.execution is None
-        assert charging_adapter._charging.is_active is False
-        assert charging_adapter._charging.was_charging is True
 
-    def test_charging_not_complete_while_action_running(
+    def test_execute_start_charging_sends_instant_action(
         self, charging_adapter, mock_api
     ):
-        """Charging waits while startCharging action is still running."""
+        """execute_action(startCharging) → instantAction 전송."""
+        # navigate로 charger 이름 저장
         dest = MagicMock()
         dest.name = 'charger_1'
         dest.final_name = 'charger_1'
         dest.position = [5.0, 10.0, 0.0]
         dest.map = 'map1'
-        execution = MagicMock()
-
-        charging_adapter.navigate(dest, execution)
+        charging_adapter.navigate(dest, MagicMock())
         charging_adapter.cancel_cmd_attempt()
 
-        # pre-charger 도착
-        state = MagicMock()
-        target = charging_adapter._nav.target_position
-        data = RobotUpdateData(
-            robot_name='AGV-001', map_name='map1',
-            position=[target[0], target[1], 0.0],
-            battery_soc=0.50,
+        # startCharging execute_action
+        execution = MagicMock()
+        charging_adapter.execute_action(
+            'startCharging', {'charging_waypoint': 3}, execution,
         )
-        charging_adapter.update(state, data)
 
-        # is_command_completed == False (아직 도킹/충전 시작 안됨)
-        mock_api.is_command_completed.return_value = False
-        charging_adapter.update(state, data)
+        mock_api.start_activity.assert_called_once()
+        call_args = mock_api.start_activity.call_args[0]
+        assert call_args[2] == 'startCharging'
+        assert call_args[3] == {'stationName': 'charger_1'}
 
+    def test_start_charging_does_not_call_finished(
+        self, charging_adapter, mock_api
+    ):
+        """startCharging에서 execution.finished()가 호출되지 않는다."""
+        dest = MagicMock()
+        dest.name = 'charger_1'
+        dest.final_name = 'charger_1'
+        dest.position = [5.0, 10.0, 0.0]
+        dest.map = 'map1'
+        charging_adapter.navigate(dest, MagicMock())
+        charging_adapter.cancel_cmd_attempt()
+
+        execution = MagicMock()
+        charging_adapter.execute_action(
+            'startCharging', {}, execution,
+        )
+
+        # finished가 즉시 호출되지 않음
         execution.finished.assert_not_called()
-        assert charging_adapter._charging.is_active is True
-        assert charging_adapter._charging.was_charging is False
+        # execution이 self.execution에 저장되지 않음 (별도 필드)
+        assert charging_adapter._charging_execution is execution
 
-    def test_stop_during_charging_sets_was_charging(
+    def test_start_charging_finished_keeps_execution_open(
         self, charging_adapter, mock_api
     ):
-        """충전 중 stop() 호출 시 _was_charging=True로 설정."""
+        """Verify startCharging FINISHED keeps execution open."""
         dest = MagicMock()
         dest.name = 'charger_1'
         dest.final_name = 'charger_1'
         dest.position = [5.0, 10.0, 0.0]
         dest.map = 'map1'
+        charging_adapter.navigate(dest, MagicMock())
+        charging_adapter.cancel_cmd_attempt()
+
         execution = MagicMock()
-
-        charging_adapter.navigate(dest, execution)
-        charging_adapter.cancel_cmd_attempt()
-
-        # pre-charger 도착
-        state = MagicMock()
-        target = charging_adapter._nav.target_position
-        data = RobotUpdateData(
-            robot_name='AGV-001', map_name='map1',
-            position=[target[0], target[1], 0.0],
-            battery_soc=0.50,
+        charging_adapter.execute_action(
+            'startCharging', {}, execution,
         )
-        charging_adapter.update(state, data)
-        assert charging_adapter._charging.is_active is True
 
-        # negotiation → stop
-        activity = MagicMock()
-        execution.identifier.is_same.return_value = True
-        charging_adapter.stop(activity)
-        charging_adapter.cancel_cmd_attempt()
-
-        # stopCharging은 즉시 전송하지 않음
-        mock_api.start_activity.assert_not_called()
-        # 대신 _was_charging 플래그 설정
-        assert charging_adapter._charging.was_charging is True
-        assert charging_adapter._charging.is_active is False
-        assert charging_adapter._charging.is_pending is False
-
-    def test_reset_order_clears_charging_state_but_preserves_was(
-        self, charging_adapter
-    ):
-        """_reset_order_state가 충전 상태를 초기화하되 _was_charging은 보존."""
-        charging_adapter._charging.is_active = True
-        charging_adapter._charging.is_pending = True
-        charging_adapter._charging.station_name = 'charger_1'
-        charging_adapter._charging.action_id = 'some_id'
-        charging_adapter._charging.was_charging = True
-
-        charging_adapter._reset_order_state()
-
-        assert charging_adapter._charging.is_active is False
-        assert charging_adapter._charging.is_pending is False
-        assert charging_adapter._charging.station_name is None
-        assert charging_adapter._charging.action_id is None
-        # _was_charging은 보존됨
-        assert charging_adapter._charging.was_charging is True
-
-    def test_next_navigate_after_charging_has_stop_charging(
-        self, charging_adapter, mock_api
-    ):
-        """충전 완료 후 다음 navigate에 stopCharging nodeAction 부착."""
-        # 1. 충전 navigate
-        dest = MagicMock()
-        dest.name = 'charger_1'
-        dest.final_name = 'charger_1'
-        dest.position = [5.0, 10.0, 0.0]
-        dest.map = 'map1'
-        execution = MagicMock()
-
-        charging_adapter.navigate(dest, execution)
-        charging_adapter.cancel_cmd_attempt()
-
-        # pre-charger 도착 + startCharging FINISHED
-        state = MagicMock()
-        target = charging_adapter._nav.target_position
-        data = RobotUpdateData(
-            robot_name='AGV-001', map_name='map1',
-            position=[target[0], target[1], 0.0],
-            battery_soc=0.50,
-        )
-        charging_adapter.update(state, data)
+        # AGV startCharging FINISHED
         mock_api.is_command_completed.return_value = True
+        state = MagicMock()
+        data = RobotUpdateData(
+            robot_name='AGV-001', map_name='map1',
+            position=[5.0, 5.0, 0.0], battery_soc=0.50,
+        )
         charging_adapter.update(state, data)
-        assert charging_adapter._charging.was_charging is True
 
-        # task 종료 시뮬레이션
-        charging_adapter._reset_order_state()
-        assert charging_adapter._charging.was_charging is True
+        # execution.finished()는 호출되지 않음!
+        execution.finished.assert_not_called()
+        # tracking은 클리어됨
+        assert charging_adapter._charging_cmd_id is None
+        # execution handle은 유지됨
+        assert charging_adapter._charging_execution is execution
 
-        # 2. 새로운 navigate (go_to_place)
-        charging_adapter.position = [5.0, 5.0, 0.0]
-        mock_api.navigate.reset_mock()
-        mock_api.is_command_completed.return_value = False
-
-        dest2 = MagicMock()
-        dest2.name = 'wp2'
-        dest2.final_name = 'wp2'
-        dest2.position = [5.0, 0.0, 0.0]
-        dest2.map = 'map1'
-        mock_handle = MagicMock()
-        mock_handle.more.return_value.current_task_id \
-            .return_value = 'new-task-001'
-        charging_adapter.update_handle = mock_handle
-
-        charging_adapter.navigate(dest2, MagicMock())
-        charging_adapter.cancel_cmd_attempt()
-
-        call_args = mock_api.navigate.call_args[0]
-        nodes = call_args[2]
-
-        # 첫 번째 노드에 stopCharging nodeAction 부착 확인
-        first_node = nodes[0]
-        stop_actions = [
-            a for a in first_node.actions
-            if a.action_type == 'stopCharging'
-        ]
-        assert len(stop_actions) == 1
-        assert charging_adapter._charging.was_charging is False
-
-    def test_was_charging_persists_through_reset(
-        self, charging_adapter
-    ):
-        """_was_charging은 _reset_order_state 이후에도 유지된다."""
-        charging_adapter._charging.was_charging = True
-        charging_adapter._reset_order_state()
-        assert charging_adapter._charging.was_charging is True
-
-    def test_charging_navigate_uses_track_action_id(
+    def test_execute_stop_charging_sends_with_pre_charger(
         self, charging_adapter, mock_api
     ):
-        """충전 navigate에서 track_action_id가 전달된다."""
+        """execute_action(stopCharging) → pre-charger stationName 전송."""
+        dest = MagicMock()
+        dest.name = 'charger_1'
+        dest.final_name = 'charger_1'
+        dest.position = [5.0, 10.0, 0.0]
+        dest.map = 'map1'
+        charging_adapter.navigate(dest, MagicMock())
+        charging_adapter.cancel_cmd_attempt()
+        mock_api.start_activity.reset_mock()
+
+        execution = MagicMock()
+        charging_adapter.execute_action(
+            'stopCharging', {}, execution,
+        )
+
+        mock_api.start_activity.assert_called_once()
+        call_args = mock_api.start_activity.call_args[0]
+        assert call_args[2] == 'stopCharging'
+        assert call_args[3] == {'stationName': 'wp3'}
+
+    def test_stop_charging_finished_calls_execution_finished(
+        self, charging_adapter, mock_api
+    ):
+        """Verify stopCharging FINISHED calls execution.finished()."""
+        dest = MagicMock()
+        dest.name = 'charger_1'
+        dest.final_name = 'charger_1'
+        dest.position = [5.0, 10.0, 0.0]
+        dest.map = 'map1'
+        charging_adapter.navigate(dest, MagicMock())
+        charging_adapter.cancel_cmd_attempt()
+
+        execution = MagicMock()
+        charging_adapter.execute_action('stopCharging', {}, execution)
+
+        # AGV stopCharging FINISHED
+        mock_api.is_command_completed.return_value = True
+        state = MagicMock()
+        data = RobotUpdateData(
+            robot_name='AGV-001', map_name='map1',
+            position=[5.0, 5.0, 0.0], battery_soc=0.80,
+        )
+        charging_adapter.update(state, data)
+
+        execution.finished.assert_called_once()
+        assert charging_adapter._stop_charging_execution is None
+
+    def test_navigate_no_start_charging_in_order(
+        self, charging_adapter, mock_api
+    ):
+        """Navigate order에는 startCharging nodeAction이 없다."""
         dest = MagicMock()
         dest.name = 'charger_1'
         dest.final_name = 'charger_1'
@@ -2855,116 +2742,28 @@ class TestCharging:
         charging_adapter.navigate(dest, MagicMock())
         charging_adapter.cancel_cmd_attempt()
 
-        # track_action_id가 navigate 호출에 포함됨
-        call_kwargs = mock_api.navigate.call_args[1]
-        assert 'track_action_id' in call_kwargs
-        assert call_kwargs['track_action_id'] is not None
-        assert 'startCharging' in call_kwargs['track_action_id']
-
-    def test_full_charging_cycle(
-        self, charging_adapter, mock_api
-    ):
-        """전체 충전 흐름: navigate → 도착 → action완료 → 다음 order."""
-        dest = MagicMock()
-        dest.name = 'charger_1'
-        dest.final_name = 'charger_1'
-        dest.position = [5.0, 10.0, 0.0]
-        dest.map = 'map1'
-        execution = MagicMock()
-
-        # 1. navigate (dock 감지 → 충전 pending)
-        charging_adapter.navigate(dest, execution)
-        charging_adapter.cancel_cmd_attempt()
-
-        assert charging_adapter._charging.is_pending is True
-        assert charging_adapter._nav.is_navigating is True
-        assert charging_adapter._charging.is_active is False
-
-        # order에 charger 노드 미포함 확인
         nodes = mock_api.navigate.call_args[0][2]
-        node_ids = [n.node_id for n in nodes]
-        assert 'charger_1' not in node_ids
-
-        # startCharging action 확인
         has_start_charging = any(
             a.action_type == 'startCharging'
             for n in nodes for a in n.actions
         )
-        assert has_start_charging
+        assert not has_start_charging
 
-        # 2. 이동 중 (도착 전)
-        state = MagicMock()
-        target = charging_adapter._nav.target_position
-        data_moving = RobotUpdateData(
-            robot_name='AGV-001', map_name='map1',
-            position=[2.0, 0.0, 0.0],  # 멀리 있음
-            battery_soc=0.30,
-        )
-        charging_adapter.update(state, data_moving)
-        assert charging_adapter._nav.is_navigating is True
-        assert charging_adapter._charging.is_active is False
-        execution.finished.assert_not_called()
+    def test_navigate_no_track_action_id(
+        self, charging_adapter, mock_api
+    ):
+        """Navigate order에 track_action_id가 없다."""
+        dest = MagicMock()
+        dest.name = 'charger_1'
+        dest.final_name = 'charger_1'
+        dest.position = [5.0, 10.0, 0.0]
+        dest.map = 'map1'
 
-        # 3. pre-charger 노드 도착
-        data_arrived = RobotUpdateData(
-            robot_name='AGV-001', map_name='map1',
-            position=[target[0], target[1], 0.0],
-            battery_soc=0.40,
-        )
-        charging_adapter.update(state, data_arrived)
-        assert charging_adapter._charging.is_active is True
-        assert charging_adapter._nav.is_navigating is False
-        execution.finished.assert_not_called()
-
-        # 4. 충전 중 (action 미완료)
-        mock_api.is_command_completed.return_value = False
-        data_charging = RobotUpdateData(
-            robot_name='AGV-001', map_name='map1',
-            position=[target[0], target[1], 0.0],
-            battery_soc=0.70,
-        )
-        charging_adapter.update(state, data_charging)
-        assert charging_adapter._charging.is_active is True
-        execution.finished.assert_not_called()
-
-        # 5. startCharging action FINISHED → 충전 task 완료
-        mock_api.is_command_completed.return_value = True
-        charging_adapter.update(state, data_charging)
-
-        execution.finished.assert_called_once()
-        assert charging_adapter.execution is None
-        assert charging_adapter._charging.is_active is False
-        assert charging_adapter._charging.was_charging is True
-
-        # 6. task 종료 → order reset
-        charging_adapter._reset_order_state()
-        assert charging_adapter._charging.was_charging is True
-
-        # 7. 다음 order에서 stopCharging nodeAction 부착
-        mock_api.navigate.reset_mock()
-        mock_api.is_command_completed.return_value = False
-        charging_adapter.position = [5.0, 5.0, 0.0]
-        dest2 = MagicMock()
-        dest2.name = 'wp1'
-        dest2.final_name = 'wp1'
-        dest2.position = [0.0, 0.0, 0.0]
-        dest2.map = 'map1'
-        mock_handle = MagicMock()
-        mock_handle.more.return_value.current_task_id \
-            .return_value = 'goto-task-001'
-        charging_adapter.update_handle = mock_handle
-
-        charging_adapter.navigate(dest2, MagicMock())
+        charging_adapter.navigate(dest, MagicMock())
         charging_adapter.cancel_cmd_attempt()
 
-        nodes2 = mock_api.navigate.call_args[0][2]
-        first_node = nodes2[0]
-        stop_actions = [
-            a for a in first_node.actions
-            if a.action_type == 'stopCharging'
-        ]
-        assert len(stop_actions) == 1
-        assert charging_adapter._charging.was_charging is False
+        call_kwargs = mock_api.navigate.call_args[1]
+        assert call_kwargs.get('track_action_id') is None
 
     def test_intermediate_navigate_excludes_charger(
         self, charging_adapter, mock_api
@@ -3062,8 +2861,8 @@ class TestCharging:
         # charger 노드 미포함, wp3만 포함
         assert 'charger_1' not in node_ids
         assert node_ids == ['wp3']
-        # startCharging action 부착
-        assert any(
+        # startCharging은 navigate가 아닌 execute_action으로 전송됨
+        assert not any(
             a.action_type == 'startCharging'
             for a in nodes[0].actions
         )
@@ -3196,285 +2995,16 @@ class TestCharging:
         # wp1은 charger_1과 인접하지 않으므로 charger 제거 안됨
         assert 'charger_1' in node_ids
         assert 'wp1' in node_ids
-        # startCharging은 여전히 부착 (charger 노드에)
+        # startCharging은 navigate가 아닌 execute_action으로 전송됨
         has_start_charging = any(
             a.action_type == 'startCharging'
             for n in nodes_list for a in n.actions
         )
-        assert has_start_charging
-
-
-class TestChargingDecommission:
-    """충전 중 decommission / SOC 기반 recommission 테스트.
-
-    startCharging 완료 후 SOC가 recharge_soc에 도달할 때까지
-    로봇을 decommission 상태로 유지하여 Task 할당을 차단한다.
-    """
-
-    @pytest.fixture
-    def charging_adapter(self, mock_api, mock_node):
-        """Charger 노드가 포함된 어댑터 (recharge_soc=0.8)."""
-        from vda5050_fleet_adapter.infra.nav_graph.graph_utils import (
-            create_graph,
-        )
-        nodes = {
-            'wp1': {'x': 0.0, 'y': 0.0, 'attributes': {}},
-            'wp2': {'x': 5.0, 'y': 0.0, 'attributes': {}},
-            'wp3': {'x': 5.0, 'y': 5.0, 'attributes': {}},
-            'charger_1': {
-                'x': 5.0, 'y': 10.0,
-                'attributes': {'is_charger': True},
-            },
-        }
-        edges = {
-            'e0': {'start': 'wp1', 'end': 'wp2', 'attributes': {}},
-            'e1': {'start': 'wp2', 'end': 'wp1', 'attributes': {}},
-            'e2': {'start': 'wp2', 'end': 'wp3', 'attributes': {}},
-            'e3': {'start': 'wp3', 'end': 'wp2', 'attributes': {}},
-            'e4': {
-                'start': 'wp3', 'end': 'charger_1',
-                'attributes': {},
-            },
-            'e5': {
-                'start': 'charger_1', 'end': 'wp3',
-                'attributes': {},
-            },
-        }
-        graph = create_graph(nodes, edges)
-        robot = RobotAdapter(
-            name='AGV-001', api=mock_api, node=mock_node,
-            fleet_handle=MagicMock(),
-            nav_nodes=nodes, nav_edges=edges, nav_graph=graph,
-            recharge_soc=0.8,
-        )
-        robot.configuration = MagicMock()
-        mock_handle = MagicMock()
-        mock_handle.more.return_value.current_task_id \
-            .return_value = 'charge-task-001'
-        robot.update_handle = mock_handle
-        robot.position = [0.0, 0.0, 0.0]
-        return robot
-
-    def _complete_charging(self, adapter, mock_api):
-        """충전 navigate → pre-charger 도착 → startCharging FINISHED."""
-        dest = MagicMock()
-        dest.name = 'charger_1'
-        dest.final_name = 'charger_1'
-        dest.position = [5.0, 10.0, 0.0]
-        dest.map = 'map1'
-        execution = MagicMock()
-
-        adapter.navigate(dest, execution)
-        adapter.cancel_cmd_attempt()
-
-        # pre-charger 도착
-        state = MagicMock()
-        target = adapter._nav.target_position
-        data = RobotUpdateData(
-            robot_name='AGV-001', map_name='map1',
-            position=[target[0], target[1], 0.0],
-            battery_soc=0.30,
-        )
-        adapter.update(state, data)
-
-        # startCharging FINISHED
-        mock_api.is_command_completed.return_value = True
-        adapter.update(state, data)
-
-        return execution
-
-    def test_decommission_on_charging_start(
-        self, charging_adapter, mock_api
-    ):
-        """Charging 완료 시 decommission 플래그가 설정된다."""
-        self._complete_charging(charging_adapter, mock_api)
-
-        assert charging_adapter._charging.is_decommissioned is True
-        assert charging_adapter._charging.was_charging is True
-
-    def test_stays_decommissioned_while_soc_low(
-        self, charging_adapter, mock_api
-    ):
-        """SOC가 recharge_soc 미만이면 decommission이 유지된다."""
-        self._complete_charging(charging_adapter, mock_api)
-
-        # SOC 0.5 < recharge_soc 0.8 → decommission 유지
-        state = MagicMock()
-        data = RobotUpdateData(
-            robot_name='AGV-001', map_name='map1',
-            position=[5.0, 5.0, 0.0],
-            battery_soc=0.5,
-        )
-        mock_api.is_command_completed.return_value = False
-        charging_adapter.update(state, data)
-
-        assert charging_adapter._charging.is_decommissioned is True
-
-        more_handle = (
-            charging_adapter.update_handle.more.return_value
-        )
-        more_handle.set_commission.assert_called()
-        commission = more_handle.commission.return_value
-        assert commission.accept_dispatched_tasks is False
-        assert commission.accept_direct_tasks is False
-        assert commission.perform_idle_behavior is False
-
-    def test_recommission_when_soc_reaches_threshold(
-        self, charging_adapter, mock_api
-    ):
-        """SOC가 정확히 recharge_soc에 도달하면 recommission된다."""
-        self._complete_charging(charging_adapter, mock_api)
-
-        state = MagicMock()
-        data = RobotUpdateData(
-            robot_name='AGV-001', map_name='map1',
-            position=[5.0, 5.0, 0.0],
-            battery_soc=0.8,  # == recharge_soc
-        )
-        mock_api.is_command_completed.return_value = False
-        charging_adapter.update(state, data)
-
-        assert charging_adapter._charging.is_decommissioned is False
-        assert charging_adapter._last_commission is None
-
-    def test_recommission_above_threshold(
-        self, charging_adapter, mock_api
-    ):
-        """SOC가 recharge_soc를 초과해도 recommission된다."""
-        self._complete_charging(charging_adapter, mock_api)
-
-        state = MagicMock()
-        data = RobotUpdateData(
-            robot_name='AGV-001', map_name='map1',
-            position=[5.0, 5.0, 0.0],
-            battery_soc=0.95,  # > recharge_soc
-        )
-        mock_api.is_command_completed.return_value = False
-        charging_adapter.update(state, data)
-
-        assert charging_adapter._charging.is_decommissioned is False
-        assert charging_adapter._last_commission is None
-
-    def test_stop_during_charging_clears_decommission(
-        self, charging_adapter, mock_api
-    ):
-        """충전 중 negotiation stop 시 decommission 해제."""
-        dest = MagicMock()
-        dest.name = 'charger_1'
-        dest.final_name = 'charger_1'
-        dest.position = [5.0, 10.0, 0.0]
-        dest.map = 'map1'
-        execution = MagicMock()
-
-        charging_adapter.navigate(dest, execution)
-        charging_adapter.cancel_cmd_attempt()
-
-        # pre-charger 도착 → _is_charging = True
-        state = MagicMock()
-        target = charging_adapter._nav.target_position
-        data = RobotUpdateData(
-            robot_name='AGV-001', map_name='map1',
-            position=[target[0], target[1], 0.0],
-            battery_soc=0.30,
-        )
-        charging_adapter.update(state, data)
-        assert charging_adapter._charging.is_active is True
-
-        # negotiation stop
-        activity = MagicMock()
-        execution.identifier.is_same.return_value = True
-        charging_adapter.stop(activity)
-        charging_adapter.cancel_cmd_attempt()
-
-        assert charging_adapter._charging.is_decommissioned is False
-        assert charging_adapter._charging.was_charging is True
-
-    def test_navigate_with_stop_charging_clears_flag(
-        self, charging_adapter, mock_api
-    ):
-        """Navigate에서 stopCharging 부착 시 decommission 해제."""
-        self._complete_charging(charging_adapter, mock_api)
-        assert charging_adapter._charging.is_decommissioned is True
-
-        # task 종료 → order reset
-        charging_adapter._reset_order_state()
-        assert charging_adapter._charging.is_decommissioned is True
-
-        # 새 navigate → stopCharging 부착
-        charging_adapter.position = [5.0, 5.0, 0.0]
-        mock_api.navigate.reset_mock()
-        mock_api.is_command_completed.return_value = False
-
-        dest2 = MagicMock()
-        dest2.name = 'wp2'
-        dest2.final_name = 'wp2'
-        dest2.position = [5.0, 0.0, 0.0]
-        dest2.map = 'map1'
-        mock_handle = MagicMock()
-        mock_handle.more.return_value.current_task_id \
-            .return_value = 'new-task-001'
-        charging_adapter.update_handle = mock_handle
-
-        charging_adapter.navigate(dest2, MagicMock())
-        charging_adapter.cancel_cmd_attempt()
-
-        assert charging_adapter._charging.is_decommissioned is False
-        assert charging_adapter._charging.was_charging is False
-
-    def test_no_decommission_when_not_charging(
-        self, charging_adapter, mock_api
-    ):
-        """충전이 아닌 일반 상태에서는 decommission이 적용 안 됨."""
-        state = MagicMock()
-        data = RobotUpdateData(
-            robot_name='AGV-001', map_name='map1',
-            position=[0.0, 0.0, 0.0],
-            battery_soc=0.3,
-        )
-        mock_api.get_commission_state.return_value = CommissionState(
-            True, True, True
-        )
-
-        charging_adapter.update(state, data)
-
-        assert charging_adapter._charging.is_decommissioned is False
-
-    def test_default_recharge_soc(
-        self, mock_api, mock_node,
-        sample_nav_nodes, sample_nav_edges,
-    ):
-        """기본 recharge_soc는 1.0이다."""
-        from vda5050_fleet_adapter.infra.nav_graph.graph_utils import (
-            create_graph,
-        )
-        graph = create_graph(sample_nav_nodes, sample_nav_edges)
-        robot = RobotAdapter(
-            name='AGV-001', api=mock_api, node=mock_node,
-            fleet_handle=MagicMock(),
-            nav_nodes=sample_nav_nodes,
-            nav_edges=sample_nav_edges,
-            nav_graph=graph,
-        )
-        assert robot.recharge_soc == 1.0
-
-    def test_decommission_persists_through_reset(
-        self, charging_adapter, mock_api
-    ):
-        """_is_charging_decommissioned은 _reset_order_state 이후 유지."""
-        self._complete_charging(charging_adapter, mock_api)
-        assert charging_adapter._charging.is_decommissioned is True
-
-        charging_adapter._reset_order_state()
-
-        assert charging_adapter._charging.is_decommissioned is True
+        assert not has_start_charging
 
 
 class TestReconnection:
-    """로봇 reconnection 시 stale 충전 상태 리셋 테스트.
-
-    시나리오: 로봇이 충전 중 종료 후 다른 위치에서 재시작.
-    어댑터의 was_charging/is_decommissioned 등이 리셋되어야 한다.
-    """
+    """로봇 reconnection 시 stale 충전 상태 리셋 테스트."""
 
     @pytest.fixture
     def charging_adapter(self, mock_api, mock_node):
@@ -3519,15 +3049,14 @@ class TestReconnection:
         robot.position = [0.0, 0.0, 0.0]
         return robot
 
-    def test_reconnect_resets_was_charging(
+    def test_reconnect_resets_charging_state(
         self, charging_adapter, mock_api
     ):
-        """로봇 reconnection 시 was_charging이 리셋된다."""
-        # 충전 완료 상태 시뮬레이션
-        charging_adapter._charging.was_charging = True
-        charging_adapter._charging.is_decommissioned = True
+        """로봇 reconnection 시 충전 상태가 리셋된다."""
+        charging_adapter._charging_execution = MagicMock()
+        charging_adapter._charger_name = 'charger_1'
+        charging_adapter._pre_charger_name = 'wp3'
 
-        # 로봇 disconnect → reconnect 시뮬레이션
         charging_adapter._was_connected = False
         mock_api.is_robot_connected.return_value = True
 
@@ -3538,52 +3067,15 @@ class TestReconnection:
         )
         charging_adapter.update(state, data)
 
-        assert charging_adapter._charging.was_charging is False
-        assert charging_adapter._charging.is_decommissioned is False
-
-    def test_reconnect_no_stop_charging_on_next_navigate(
-        self, charging_adapter, mock_api
-    ):
-        """Reconnection 후 navigate에 stopCharging이 붙지 않는다."""
-        # 충전 완료 상태 시뮬레이션
-        charging_adapter._charging.was_charging = True
-        charging_adapter._charging.is_decommissioned = True
-
-        # disconnect → reconnect
-        charging_adapter._was_connected = False
-        mock_api.is_robot_connected.return_value = True
-
-        state = MagicMock()
-        data = RobotUpdateData(
-            robot_name='AGV-001', map_name='map1',
-            position=[0.0, 0.0, 0.0], battery_soc=0.5,
-        )
-        charging_adapter.update(state, data)
-
-        # 다른 위치에서 navigate
-        charging_adapter.position = [0.0, 0.0, 0.0]
-        dest = MagicMock()
-        dest.name = 'wp2'
-        dest.final_name = 'wp2'
-        dest.position = [5.0, 0.0, 0.0]
-        dest.map = 'map1'
-        dest.waypoint_names = None
-
-        charging_adapter.navigate(dest, MagicMock())
-        charging_adapter.cancel_cmd_attempt()
-
-        nodes = mock_api.navigate.call_args[0][2]
-        has_stop_charging = any(
-            a.action_type == 'stopCharging'
-            for n in nodes for a in n.actions
-        )
-        assert not has_stop_charging
+        assert charging_adapter._charging_execution is None
+        assert charging_adapter._charger_name is None
+        assert charging_adapter._pre_charger_name is None
 
     def test_no_reset_when_still_connected(
         self, charging_adapter, mock_api
     ):
         """연결이 유지 중이면 charging 상태를 리셋하지 않는다."""
-        charging_adapter._charging.was_charging = True
+        charging_adapter._charger_name = 'charger_1'
         charging_adapter._was_connected = True
         mock_api.is_robot_connected.return_value = True
 
@@ -3594,14 +3086,13 @@ class TestReconnection:
         )
         charging_adapter.update(state, data)
 
-        # 연결이 끊어진 적 없으므로 리셋되지 않음
-        assert charging_adapter._charging.was_charging is True
+        assert charging_adapter._charger_name == 'charger_1'
 
     def test_no_reset_while_disconnected(
         self, charging_adapter, mock_api
     ):
         """연결이 끊어진 상태에서는 리셋되지 않는다."""
-        charging_adapter._charging.was_charging = True
+        charging_adapter._charger_name = 'charger_1'
         charging_adapter._was_connected = True
         mock_api.is_robot_connected.return_value = False
 
@@ -3612,8 +3103,7 @@ class TestReconnection:
         )
         charging_adapter.update(state, data)
 
-        # 아직 reconnect되지 않았으므로 리셋되지 않음
-        assert charging_adapter._charging.was_charging is True
+        assert charging_adapter._charger_name == 'charger_1'
         assert charging_adapter._was_connected is False
 
 
