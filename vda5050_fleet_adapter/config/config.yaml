@@ -34,7 +34,7 @@ rmf_fleet:
     delivery: True
     clean: False
   actions: ["teleop", "pick", "drop"]
-  finishing_request: "park"
+  finishing_request: "charge"
   use_parking_reservations: true
   robots:
     AGV_001:
