@@ -191,6 +191,15 @@ def main(argv: list[str] | None = None) -> None:
     # 6. Fleet handle 생성
     fleet_handle = adapter.add_easy_fleet(fleet_config)
 
+    # 6-1. startCharging/stopCharging action 등록
+    def _consider(
+        description: dict,
+    ) -> bool:
+        return True
+
+    fleet_handle.more().add_performable_action('startCharging', _consider)
+    fleet_handle.more().add_performable_action('stopCharging', _consider)
+
     # 7. MQTT + VDA5050 RobotAPI 생성
     fleet_mgr = config_yaml.get('fleet_manager', {})
     mqtt_config = MqttConfig(
